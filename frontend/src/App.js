@@ -9,6 +9,7 @@ import CustomerHome from './pages/Customer/CustomerHome';
 import Account from './pages/Customer/Account';
 import Auth from './pages/Auth/Auth';
 import SellerHome from './pages/Seller/SellerHome';
+import { getCoordsFromLocation } from './utils/geoMapper';
 
 import './App.css';
 
@@ -27,30 +28,53 @@ function MainLayout() {
   });
   const [wishlist, setWishlist] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
+  
+  // Dynamic Initial Location
   const [currentLocation, setCurrentLocation] = useState('Chittinagar, Krishna (520001)');
-  const [customerCoords, setCustomerCoords] = useState({ lat: 16.5215, lng: 80.6120 });
+  const [customerCoords, setCustomerCoords] = useState(() => getCoordsFromLocation('Chittinagar, Krishna (520001)'));
+  
   const [isCartOpen, setIsCartOpen] = useState(false);
   const [isCheckingOut, setIsCheckingOut] = useState(false);
   const navigate = useNavigate();
 
-  // Save cart in localStorage to retain on refresh
+  // Load customer default address on auth change
+  useEffect(() => {
+    if (currentUser) {
+      const userId = currentUser._id || currentUser.id || currentUser.username;
+      axios.get(`/api/user/locations/${userId}`).then(res => {
+        if (Array.isArray(res.data) && res.data.length > 0) {
+          const defaultLoc = res.data.find(l => l.isDefault) || res.data[0];
+          if (defaultLoc) {
+            const locText = `${defaultLoc.labelName}: ${defaultLoc.address}`;
+            setCurrentLocation(locText);
+            setCustomerCoords(getCoordsFromLocation(defaultLoc.address, defaultLoc.pin));
+          }
+        }
+      }).catch(console.error);
+    }
+  }, [currentUser]);
+
+  // Keep customerCoords always 100% in sync with currentLocation
+  useEffect(() => {
+    setCustomerCoords(getCoordsFromLocation(currentLocation));
+  }, [currentLocation]);
+
   useEffect(() => {
     localStorage.setItem('hs_cart', JSON.stringify(cart));
   }, [cart]);
 
-  // Initial Database Fetch on Mount / Refresh
   const fetchFoodsFromDB = useCallback(async () => {
     try {
       const res = await axios.get('/api/food');
       if (Array.isArray(res.data)) {
         const seen = new Set();
-        const unique = res.data.filter(item => {
+        const clean = res.data.filter(item => {
           const id = String(item._id || item.id);
           if (!id || seen.has(id)) return false;
           seen.add(id);
           return true;
         });
-        setFoods(unique);
+        setFoods(clean);
       }
     } catch (err) {
       console.error("Error fetching foods from DB:", err);
@@ -61,13 +85,7 @@ function MainLayout() {
     fetchFoodsFromDB();
 
     const handleFoodAdded = (newFood) => {
-      setFoods(prev => {
-        const exists = prev.some(f => String(f._id || f.id) === String(newFood._id || newFood.id));
-        if (exists) {
-          return prev.map(f => String(f._id || f.id) === String(newFood._id || newFood.id) ? newFood : f);
-        }
-        return [newFood, ...prev];
-      });
+      setFoods(prev => [newFood, ...prev.filter(f => String(f._id || f.id) !== String(newFood._id || newFood.id))]);
     };
 
     const handleFoodDeleted = (deletedId) => {
@@ -113,7 +131,6 @@ function MainLayout() {
     });
   };
 
-  // Instant Sandbox Order Checkout
   const handleSandboxCheckout = async () => {
     if (!currentUser) {
       alert("Please login first to complete your order!");
@@ -162,7 +179,6 @@ function MainLayout() {
         currentLocation={currentLocation}
       />
 
-      {/* Slide-in Cart Drawer */}
       {isCartOpen && (
         <div className="drawer-overlay" onClick={() => setIsCartOpen(false)}>
           <div className="drawer-content" onClick={(e) => e.stopPropagation()}>

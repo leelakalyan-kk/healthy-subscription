@@ -5,7 +5,6 @@ import { AuthContext } from '../../context/AuthContext';
 
 const socket = io('/', { transports: ['websocket', 'polling'] });
 
-// ☁️ CLOUDINARY CONFIG
 const CLOUDINARY_CLOUD_NAME = "bkqftd5a";
 const CLOUDINARY_UPLOAD_PRESET = "ml_default";
 
@@ -15,6 +14,10 @@ const SellerHome = () => {
   const [orders, setOrders] = useState([]);
   const [foods, setFoods] = useState([]);
   const [uploadingImage, setUploadingImage] = useState(false);
+
+  const activeUser = currentUser || JSON.parse(localStorage.getItem('active_user') || '{}');
+  const sellerId = String(activeUser._id || activeUser.id || activeUser.username || 'tests');
+  const sellerName = activeUser.username || activeUser.name || 'tests';
 
   const [newItem, setNewItem] = useState({
     title: '',
@@ -26,10 +29,6 @@ const SellerHome = () => {
     city: 'Vijayawada',
     imageUrl: 'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=500'
   });
-
-  const activeUser = currentUser || JSON.parse(localStorage.getItem('active_user') || '{}');
-  const sellerId = String(activeUser._id || activeUser.id || activeUser.username || 'tests');
-  const sellerName = activeUser.username || activeUser.name || 'tests';
 
   const loadData = useCallback(async () => {
     try {
@@ -80,7 +79,6 @@ const SellerHome = () => {
     };
   }, [loadData]);
 
-  // ☁️ Direct Cloudinary Upload Function
   const handleImageUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -101,8 +99,6 @@ const SellerHome = () => {
         setNewItem(prev => ({ ...prev, imageUrl: fileData.secure_url }));
         alert("✅ Image uploaded to Cloudinary successfully!");
       } else {
-        // Fallback to lightweight compressed base64 if preset is unsigned in Cloudinary console
-        console.warn("Preset error, fallback to compressed image:", fileData);
         const reader = new FileReader();
         reader.onload = (event) => {
           const img = new Image();
@@ -122,7 +118,6 @@ const SellerHome = () => {
       }
     } catch (err) {
       console.error("Cloudinary error:", err);
-      alert("Cloudinary connection error.");
     } finally {
       setUploadingImage(false);
     }
@@ -130,8 +125,8 @@ const SellerHome = () => {
 
   const handleAddFood = async (e) => {
     e.preventDefault();
-    if (!newItem.title || !newItem.price) {
-      alert("Please fill in Dish Title and Price!");
+    if (!newItem.title || !newItem.price || !newItem.areaName || !newItem.pincode) {
+      alert("Please fill in Dish Title, Price, Kitchen Area and PIN Code!");
       return;
     }
 
@@ -177,10 +172,14 @@ const SellerHome = () => {
     }
   };
 
+  const currentKitchenLocation = foods[0]?.areaName 
+    ? `${foods[0].areaName}, ${foods[0].city} (${foods[0].pincode})` 
+    : 'Benz Circle, Vijayawada (520001)';
+
   return (
     <div style={{ maxWidth: '1200px', margin: '0 auto', padding: '24px 16px' }}>
       
-      {/* Seller Header */}
+      {/* Seller Header with Kitchen Location */}
       <div style={{
         background: '#0f172a',
         color: '#ffffff',
@@ -194,10 +193,15 @@ const SellerHome = () => {
         gap: '16px'
       }}>
         <div>
-          <span style={{ background: '#16a34a', color: '#fff', padding: '4px 10px', borderRadius: '12px', fontSize: '11px', fontWeight: '800' }}>
-            VERIFIED PARTNER KITCHEN
-          </span>
-          <h2 style={{ margin: '8px 0 4px 0', fontSize: '24px', fontWeight: '800' }}>
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '8px' }}>
+            <span style={{ background: '#16a34a', color: '#fff', padding: '4px 10px', borderRadius: '12px', fontSize: '11px', fontWeight: '800' }}>
+              VERIFIED PARTNER KITCHEN
+            </span>
+            <span style={{ background: 'rgba(255,255,255,0.15)', color: '#e2e8f0', padding: '4px 10px', borderRadius: '12px', fontSize: '11px', fontWeight: '700' }}>
+              📍 Kitchen Hub: {currentKitchenLocation}
+            </span>
+          </div>
+          <h2 style={{ margin: '0 0 4px 0', fontSize: '24px', fontWeight: '800' }}>
             👨‍🍳 {sellerName}
           </h2>
           <p style={{ margin: 0, fontSize: '13px', color: '#94a3b8' }}>
@@ -285,6 +289,9 @@ const SellerHome = () => {
                       <h4 style={{ margin: 0, fontSize: '16px', color: '#0f172a' }}>{item.title}</h4>
                       <span style={{ color: '#16a34a', fontWeight: '800', fontSize: '16px' }}>₹{item.price}</span>
                     </div>
+                    <div style={{ fontSize: '12px', color: '#059669', marginBottom: '6px', fontWeight: '600' }}>
+                      📍 {item.areaName || 'Benz Circle'}, {item.city || 'Vijayawada'} ({item.pincode || '520001'})
+                    </div>
                     <p style={{ margin: '0 0 12px 0', color: '#64748b', fontSize: '12px', lineHeight: '1.4' }}>{item.description || 'Nutritious meal'}</p>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                       <span style={{ background: '#ecfdf5', color: '#16a34a', padding: '3px 8px', borderRadius: '6px', fontSize: '11px', fontWeight: '700' }}>
@@ -350,6 +357,44 @@ const SellerHome = () => {
             </div>
           </div>
 
+          {/* Kitchen Location Inputs */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr 1fr', gap: '10px', marginBottom: '14px' }}>
+            <div>
+              <label style={{ display: 'block', fontSize: '13px', fontWeight: '700', color: '#334155', marginBottom: '6px' }}>Kitchen Area *</label>
+              <input
+                type="text"
+                placeholder="e.g. Benz Circle"
+                value={newItem.areaName}
+                onChange={e => setNewItem({ ...newItem, areaName: e.target.value })}
+                style={{ width: '100%', padding: '10px 12px', border: '1px solid #cbd5e1', borderRadius: '8px', fontSize: '13px' }}
+                required
+              />
+            </div>
+            <div>
+              <label style={{ display: 'block', fontSize: '13px', fontWeight: '700', color: '#334155', marginBottom: '6px' }}>City *</label>
+              <input
+                type="text"
+                placeholder="e.g. Vijayawada"
+                value={newItem.city}
+                onChange={e => setNewItem({ ...newItem, city: e.target.value })}
+                style={{ width: '100%', padding: '10px 12px', border: '1px solid #cbd5e1', borderRadius: '8px', fontSize: '13px' }}
+                required
+              />
+            </div>
+            <div>
+              <label style={{ display: 'block', fontSize: '13px', fontWeight: '700', color: '#334155', marginBottom: '6px' }}>Pincode *</label>
+              <input
+                type="text"
+                maxLength="6"
+                placeholder="520001"
+                value={newItem.pincode}
+                onChange={e => setNewItem({ ...newItem, pincode: e.target.value })}
+                style={{ width: '100%', padding: '10px 12px', border: '1px solid #cbd5e1', borderRadius: '8px', fontSize: '13px' }}
+                required
+              />
+            </div>
+          </div>
+
           <div style={{ marginBottom: '14px' }}>
             <label style={{ display: 'block', fontSize: '13px', fontWeight: '700', color: '#334155', marginBottom: '6px' }}>Description</label>
             <textarea
@@ -368,7 +413,7 @@ const SellerHome = () => {
               onChange={handleImageUpload}
               style={{ width: '100%', fontSize: '13px' }}
             />
-            {uploadingImage && <p style={{ fontSize: '12px', color: '#16a34a', fontWeight: 'bold' }}>⏳ Uploading to Cloudinary ({CLOUDINARY_CLOUD_NAME})...</p>}
+            {uploadingImage && <p style={{ fontSize: '12px', color: '#16a34a', fontWeight: 'bold' }}>⏳ Uploading to Cloudinary...</p>}
             {newItem.imageUrl && (
               <img src={newItem.imageUrl} alt="Preview" style={{ width: '100px', height: '100px', objectFit: 'cover', borderRadius: '8px', marginTop: '10px' }} />
             )}

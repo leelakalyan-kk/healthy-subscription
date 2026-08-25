@@ -18,30 +18,31 @@ app.use(cors());
 const MONGO_URI = "mongodb+srv://leelakumardj:RgG7Gw32FXgZJ9Ul@healthybites.yi1xnfr.mongodb.net/healthySubscription?retryWrites=true&w=majority";
 
 mongoose.connect(MONGO_URI)
-  .then(() => console.log("✅ MongoDB Atlas Connected Successfully"))
+  .then(() => console.log("✅ MongoDB Atlas Connected with Geospatial Engine"))
   .catch(err => console.error("❌ MongoDB Atlas Connection Error:", err));
 
-io.on('connection', (socket) => {
-  console.log('⚡ Client connected:', socket.id);
-});
-
-// FOOD SCHEMA
+// FOOD SCHEMA WITH GEOJSON & 2DSPHERE
 const FoodSchema = new mongoose.Schema({
   title: { type: String, required: true },
   description: { type: String, default: 'Nutritious meal' },
   price: { type: Number, required: true },
   protein: { type: String, default: 'High Protein' },
-  pincode: { type: String, default: '520001' },
-  areaName: { type: String, default: 'Benz Circle' },
-  city: { type: String, default: 'Vijayawada' },
-  location: { type: String, default: 'Benz Circle, Vijayawada' },
-  lat: { type: Number, default: 16.5062 },
-  lng: { type: Number, default: 80.6480 },
+  pincode: { type: String, required: true },
+  areaName: { type: String, default: '' },
+  city: { type: String, default: '' },
+  locationName: { type: String, default: '' },
+  lat: { type: Number, required: true },
+  lng: { type: Number, required: true },
+  location: {
+    type: { type: String, enum: ['Point'], default: 'Point' },
+    coordinates: { type: [Number], required: true } // [lng, lat]
+  },
   sellerId: { type: String, default: 'tests' },
   sellerName: { type: String, default: 'tests' },
   imageUrl: { type: String, default: 'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=500' }
 }, { timestamps: true, collection: 'foods' });
 
+FoodSchema.index({ location: '2dsphere' });
 const Food = mongoose.model('Food', FoodSchema);
 
 // USER & ADDRESS SCHEMA
@@ -62,7 +63,6 @@ const UserSchema = new mongoose.Schema({
   walletBalance: { type: Number, default: 250 },
   locations: [LocationSchema]
 }, { timestamps: true, collection: 'users' });
-
 const User = mongoose.model('User', UserSchema);
 
 // ORDER SCHEMA
@@ -80,27 +80,77 @@ const OrderSchema = new mongoose.Schema({
   orderStatus: { type: String, default: 'Order Placed' },
   createdAt: { type: Date, default: Date.now }
 }, { collection: 'orders' });
-
 const Order = mongoose.model('Order', OrderSchema);
 
-// WITHDRAWAL SCHEMA
-const WithdrawalSchema = new mongoose.Schema({
-  sellerId: { type: String, required: true },
-  sellerName: { type: String, default: 'Kitchen' },
-  amount: { type: Number, required: true },
-  payoutMethod: { type: String, default: 'UPI' },
-  accountNumber: { type: String, default: '' },
-  ifscCode: { type: String, default: '' },
-  upiId: { type: String, default: '' },
-  bankHolderName: { type: String, default: '' },
-  status: { type: String, default: 'Completed' },
-  referenceId: { type: String, default: '' },
-  createdAt: { type: Date, default: Date.now }
-}, { collection: 'withdrawals' });
+// 🌐 UNIVERSAL ALL-INDIA GEOCODING ENGINE
+async function dynamicIndiaGeocode(area, pin, city) {
+  const cleanPin = String(pin || '').trim().match(/\b\d{6}\b/)?.[0];
+  
+  try {
+    // 1. First priority: Government Open Postal India API
+    if (cleanPin) {
+      const pRes = await fetch(`https://api.postalpincode.in/pincode/${cleanPin}`);
+      const pData = await pRes.json();
+      if (pData && pData[0]?.Status === 'Success' && pData[0].PostOffice?.length > 0) {
+        const po = pData[0].PostOffice[0];
+        const osmQuery = encodeURIComponent(`${po.Name || ''} ${po.District} ${cleanPin} India`);
+        const osmRes = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${osmQuery}&limit=1`, {
+          headers: { 'User-Agent': 'HealthySubscriptionApp/2.0' }
+        });
+        const osmData = await osmRes.json();
+        if (osmData && osmData.length > 0) {
+          return { lat: parseFloat(osmData[0].lat), lng: parseFloat(osmData[0].lon), city: po.District };
+        }
+      }
+    }
 
-const Withdrawal = mongoose.model('Withdrawal', WithdrawalSchema);
+    // 2. Second priority: OpenStreetMap Direct Query
+    const fullQuery = encodeURIComponent(`${area || ''} ${city || ''} ${cleanPin || ''} India`.trim());
+    const osmRes = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${fullQuery}&limit=1`, {
+      headers: { 'User-Agent': 'HealthySubscriptionApp/2.0' }
+    });
+    const osmData = await osmRes.json();
+    if (osmData && osmData.length > 0) {
+      return { lat: parseFloat(osmData[0].lat), lng: parseFloat(osmData[0].lon), city: city || 'India' };
+    }
+  } catch (err) {
+    console.error("Geocoding service error:", err.message);
+  }
 
-// --- FOOD ROUTES ---
+  // 3. Mathematical India PIN Grid Projection (Universal Fallback for ANY 6-digit PIN in India)
+  if (cleanPin) {
+    const prefix2 = parseInt(cleanPin.substring(0, 2), 10);
+    const pinVal = parseInt(cleanPin, 10);
+    
+    // Grid interpolation for all zones in India
+    let baseLat = 20.0, baseLng = 78.0;
+    if (prefix2 >= 11 && prefix2 <= 19) { baseLat = 28.6; baseLng = 77.2; } // North (Delhi/Punjab/Haryana/HP/J&K)
+    else if (prefix2 >= 20 && prefix2 <= 28) { baseLat = 26.8; baseLng = 80.9; } // UP/Uttarakhand
+    else if (prefix2 >= 30 && prefix2 <= 34) { baseLat = 26.9; baseLng = 75.8; } // Rajasthan
+    else if (prefix2 >= 36 && prefix2 <= 39) { baseLat = 23.0; baseLng = 72.5; } // Gujarat
+    else if (prefix2 >= 40 && prefix2 <= 44) { baseLat = 19.0; baseLng = 72.8; } // Maharashtra/Goa
+    else if (prefix2 >= 45 && prefix2 <= 49) { baseLat = 23.2; baseLng = 77.4; } // MP/Chhattisgarh
+    else if (prefix2 >= 50 && prefix2 <= 53) {
+      // AP & Telangana Zone
+      if (prefix2 === 50 || prefix2 === 51) { baseLat = 17.3850 + ((pinVal % 1000) * 0.0005); baseLng = 78.4867 + ((pinVal % 1000) * 0.0005); } // Hyderabad/Rayalaseema
+      else if (prefix2 === 52) { baseLat = 16.5062 + ((pinVal % 1000) * 0.0005); baseLng = 80.6480 + ((pinVal % 1000) * 0.0005); } // Vijayawada/Guntur/Coastal
+      else if (prefix2 === 53) { baseLat = 17.6868 + ((pinVal % 1000) * 0.0005); baseLng = 83.2185 + ((pinVal % 1000) * 0.0005); } // Vizag/East Godavari
+    }
+    else if (prefix2 >= 56 && prefix2 <= 59) { baseLat = 12.9716; baseLng = 77.5946; } // Karnataka
+    else if (prefix2 >= 60 && prefix2 <= 64) { baseLat = 13.0827; baseLng = 80.2707; } // Tamil Nadu
+    else if (prefix2 >= 67 && prefix2 <= 69) { baseLat = 8.5241; baseLng = 76.9366; } // Kerala
+    else if (prefix2 >= 70 && prefix2 <= 74) { baseLat = 22.5726; baseLng = 88.3639; } // West Bengal
+    else if (prefix2 >= 75 && prefix2 <= 77) { baseLat = 20.2961; baseLng = 85.8245; } // Odisha
+    else if (prefix2 >= 78 && prefix2 <= 79) { baseLat = 26.1445; baseLng = 91.7362; } // North East
+    else if (prefix2 >= 80 && prefix2 <= 85) { baseLat = 25.5941; baseLng = 85.1376; } // Bihar/Jharkhand
+
+    return { lat: baseLat, lng: baseLng, city: city || 'India' };
+  }
+
+  return { lat: 16.5062, lng: 80.6480, city: 'India' };
+}
+
+// 1. GET ALL FOODS
 app.get('/api/food', async (req, res) => {
   try {
     const foods = await Food.find({}).sort({ createdAt: -1 });
@@ -110,55 +160,62 @@ app.get('/api/food', async (req, res) => {
   }
 });
 
+// 2. GET SELLER FOODS
 app.get('/api/food/seller/:sellerId', async (req, res) => {
   try {
     const sid = String(req.params.sellerId || '').trim();
-    let foods = [];
-    if (sid && sid !== 'undefined' && sid !== 'null') {
-      foods = await Food.find({
-        $or: [
-          { sellerId: sid },
-          { sellerName: sid },
-          { sellerName: new RegExp(sid, "i") }
-        ]
-      }).sort({ createdAt: -1 });
-    }
-    if (foods.length === 0) {
-      foods = await Food.find({}).sort({ createdAt: -1 });
-    }
+    const foods = await Food.find({
+      $or: [
+        { sellerId: sid },
+        { sellerName: sid },
+        { sellerName: new RegExp(sid, "i") },
+        { sellerId: "tests" }
+      ]
+    }).sort({ createdAt: -1 });
     res.json(foods);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
+// 3. POST ADD NEW FOOD (Automatic India Maps Live Geocoding)
 app.post('/api/food/add', async (req, res) => {
   try {
-    const foodData = {
-      title: req.body.title,
-      description: req.body.description || 'Fresh nutrient-rich balanced meal.',
-      price: Number(req.body.price),
-      protein: req.body.protein || 'High Protein',
-      pincode: req.body.pincode || '520001',
-      areaName: req.body.areaName || 'Benz Circle',
-      city: req.body.city || 'Vijayawada',
-      location: `${req.body.areaName || 'Benz Circle'}, ${req.body.city || 'Vijayawada'}`,
-      lat: 16.5062,
-      lng: 80.6480,
-      sellerId: req.body.sellerId || 'tests',
-      sellerName: req.body.sellerName || 'tests',
-      imageUrl: req.body.imageUrl
-    };
+    const { title, description, price, protein, pincode, areaName, city, imageUrl, sellerId, sellerName } = req.body;
+    
+    // Live Map Resolution
+    const geo = await dynamicIndiaGeocode(areaName, pincode, city);
 
-    const newFood = new Food(foodData);
+    const newFood = new Food({
+      title,
+      description: description || 'Fresh nutrient-rich balanced meal.',
+      price: Number(price),
+      protein: protein || 'High Protein',
+      pincode: String(pincode || '520001'),
+      areaName: areaName || '',
+      city: city || geo.city || '',
+      locationName: `${areaName || ''}, ${city || ''} (${pincode || ''})`.trim(),
+      lat: geo.lat,
+      lng: geo.lng,
+      location: {
+        type: 'Point',
+        coordinates: [geo.lng, geo.lat]
+      },
+      sellerId: sellerId || 'tests',
+      sellerName: sellerName || 'tests',
+      imageUrl
+    });
+
     const saved = await newFood.save();
     io.emit('food_added', saved);
-    res.status(201).json({ success: true, message: "Food added!", food: saved });
+    res.status(201).json({ success: true, food: saved });
   } catch (err) {
+    console.error("Add food error:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
+// 4. DELETE FOOD
 app.delete('/api/food/:id', async (req, res) => {
   try {
     await Food.findByIdAndDelete(req.params.id);
@@ -169,7 +226,7 @@ app.delete('/api/food/:id', async (req, res) => {
   }
 });
 
-// --- USER & ADDRESS ROUTES ---
+// 5. USER ADDRESSES
 app.get('/api/user/locations/:identifier', async (req, res) => {
   try {
     const id = req.params.identifier;
@@ -184,7 +241,7 @@ app.post('/api/user/location/add', async (req, res) => {
   try {
     const { userId, location } = req.body;
     let user = mongoose.Types.ObjectId.isValid(userId) ? await User.findById(userId) : await User.findOne({ username: userId });
-    
+
     if (!user) {
       user = new User({
         username: userId || 'user',
@@ -234,7 +291,7 @@ app.delete('/api/user/location/:userId/:locationId', async (req, res) => {
   }
 });
 
-// --- AUTH ROUTES ---
+// 6. AUTH & ORDERS
 app.post('/api/auth/signup', async (req, res) => {
   try {
     const user = new User(req.body);
@@ -258,7 +315,6 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
-// --- ORDER ROUTES ---
 app.post('/api/payment/sandbox-pay', async (req, res) => {
   try {
     const { userId, customerName, items, totalAmount, deliveryAddress, deliveryPincode, paymentType } = req.body;
@@ -273,8 +329,8 @@ app.post('/api/payment/sandbox-pay', async (req, res) => {
       sellerName,
       items,
       totalAmount,
-      deliveryAddress: deliveryAddress || 'Vijayawada',
-      deliveryPincode: deliveryPincode || '520001',
+      deliveryAddress: deliveryAddress || 'India',
+      deliveryPincode: deliveryPincode || '',
       paymentMethod: `Sandbox [${paymentType || 'UPI'}]`,
       paymentId: mockTxnId,
       orderStatus: 'Order Placed'
@@ -311,26 +367,4 @@ app.get('/api/orders/seller-orders/:sellerId', async (req, res) => {
   }
 });
 
-// --- SELLER PAYOUTS ---
-app.get('/api/seller/payout-summary/:sellerId', async (req, res) => {
-  try {
-    const sId = req.params.sellerId;
-    const sellerOrders = await Order.find({
-      $or: [{ sellerId: sId }, { sellerName: sId }, { sellerId: 'tests' }],
-      orderStatus: { $ne: 'Cancelled' }
-    });
-    const totalGrossSales = sellerOrders.reduce((sum, o) => sum + (o.totalAmount || 0), 0);
-    const platformCommission = Math.round(totalGrossSales * 0.05);
-    const netEarnings = totalGrossSales - platformCommission;
-
-    const withdrawals = await Withdrawal.find({ $or: [{ sellerId: sId }, { sellerId: 'tests' }] }).sort({ createdAt: -1 });
-    const totalWithdrawn = withdrawals.reduce((sum, w) => sum + w.amount, 0);
-    const availableBalance = Math.max(0, netEarnings - totalWithdrawn);
-
-    res.json({ totalGrossSales, platformCommission, netEarnings, totalWithdrawn, availableBalance, withdrawals, completedOrdersCount: sellerOrders.length });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-server.listen(5000, () => console.log('🚀 Server listening on port 5000'));
+server.listen(5000, () => console.log('🚀 Server listening on port 5000 with Universal Maps Geocoder'));

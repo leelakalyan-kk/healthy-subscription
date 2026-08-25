@@ -1,42 +1,6 @@
 import React, { useMemo, useState, useEffect } from 'react';
 import axios from 'axios';
-
-const calculateDistanceKm = (lat1, lon1, lat2, lon2) => {
-  if (!lat1 || !lon1 || !lat2 || !lon2) return 2.5;
-  const R = 6371;
-  const dLat = (lat2 - lat1) * (Math.PI / 180);
-  const dLon = (lon2 - lon1) * (Math.PI / 180);
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) *
-    Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  const distance = R * c;
-  return parseFloat(distance.toFixed(1));
-};
-
-const getKitchenCoords = (item) => {
-  if (item.lat && item.lng && item.lat !== 16.5062) {
-    return { lat: item.lat, lng: item.lng };
-  }
-  const city = (item.city || '').toLowerCase();
-  const area = (item.areaName || item.location || '').toLowerCase();
-  const pin = String(item.pincode || '');
-
-  if (pin.startsWith('500') || city.includes('hyderabad')) {
-    if (area.includes('alwal') || pin === '500010') return { lat: 17.5023, lng: 78.5284 };
-    if (area.includes('madhapur') || pin === '500081') return { lat: 17.4483, lng: 78.3915 };
-    return { lat: 17.3850, lng: 78.4867 };
-  }
-
-  if (pin.startsWith('520') || city.includes('vijayawada')) {
-    if (area.includes('chittinagar') || pin === '520001') return { lat: 16.5215, lng: 80.6120 };
-    if (area.includes('benz circle') || pin === '520010') return { lat: 16.5062, lng: 80.6480 };
-    return { lat: 16.5062, lng: 80.6480 };
-  }
-
-  return { lat: item.lat || 16.5062, lng: item.lng || 80.6480 };
-};
+import { getCoordsFromLocation, calculateDistanceKm } from '../../utils/geoMapper';
 
 const CustomerHome = ({
   foods: propFoods = [],
@@ -46,13 +10,11 @@ const CustomerHome = ({
   updateQuantity,
   wishlist = [],
   toggleWishlist,
-  currentLocation = 'Chittinagar, Krishna (520001)',
-  customerCoords = { lat: 16.5215, lng: 80.6120 }
+  currentLocation = '📍 vizag Home (530002)'
 }) => {
   const [selectedCategory, setSelectedCategory] = useState('ALL');
   const [dbFoods, setDbFoods] = useState([]);
 
-  // Auto-fetch directly if props not ready on instant refresh
   useEffect(() => {
     if (!propFoods || propFoods.length === 0) {
       axios.get('/api/food')
@@ -67,7 +29,6 @@ const CustomerHome = ({
 
   const activeFoods = propFoods && propFoods.length > 0 ? propFoods : dbFoods;
 
-  // Deduplicate items
   const uniqueFoods = useMemo(() => {
     const seen = new Set();
     return activeFoods.filter(item => {
@@ -78,25 +39,55 @@ const CustomerHome = ({
     });
   }, [activeFoods]);
 
+  // Synchronously compute active customer coordinates
+  const customerGPS = useMemo(() => {
+    return getCoordsFromLocation(currentLocation);
+  }, [currentLocation]);
+
+  // Instant Real-time Distance Computation & Strict 10 KM Filter
   const filteredFoods = useMemo(() => {
     const normalizedSearch = (searchQuery || '').toLowerCase();
 
     return uniqueFoods
       .map(item => {
-        const kitchenCoords = getKitchenCoords(item);
-        const distance = calculateDistanceKm(customerCoords.lat, customerCoords.lng, kitchenCoords.lat, kitchenCoords.lng);
-        const distanceKm = distance !== null && !Number.isNaN(distance) ? distance : 2.5;
-        return { ...item, distanceKm, etaMins: Math.round(15 + distanceKm * 3.5) };
+        // Resolve Kitchen Coordinates
+        let kLat = item.lat;
+        let kLng = item.lng;
+
+        if (item.location?.coordinates && item.location.coordinates.length === 2) {
+          kLng = item.location.coordinates[0];
+          kLat = item.location.coordinates[1];
+        }
+
+        if (!kLat || !kLng || (kLat === 16.5062 && String(item.pincode).startsWith('530'))) {
+          const loc = getCoordsFromLocation(`${item.areaName || ''} ${item.city || ''} ${item.locationName || ''}`, item.pincode);
+          kLat = loc.lat;
+          kLng = loc.lng;
+        }
+
+        const distanceKm = calculateDistanceKm(
+          customerGPS.lat,
+          customerGPS.lng,
+          kLat,
+          kLng
+        );
+
+        return {
+          ...item,
+          distanceKm,
+          etaMins: Math.max(15, Math.round(12 + distanceKm * 3))
+        };
       })
       .filter(item => {
-        const matchesRadius = item.distanceKm <= 20.0;
-        const matchesSearch = [item.title, item.description, item.sellerName]
+        // STRICT 10 KM RADIUS
+        const matchesRadius = item.distanceKm <= 10.0;
+        const matchesSearch = [item.title, item.description, item.sellerName, item.areaName, item.city]
           .some(value => value?.toLowerCase().includes(normalizedSearch));
         const matchesCategory = selectedCategory === 'ALL' || (item.protein || '').toLowerCase().includes(selectedCategory.toLowerCase());
         return matchesRadius && matchesSearch && matchesCategory;
       })
       .sort((a, b) => a.distanceKm - b.distanceKm);
-  }, [customerCoords.lat, customerCoords.lng, uniqueFoods, searchQuery, selectedCategory]);
+  }, [customerGPS, uniqueFoods, searchQuery, selectedCategory]);
 
   return (
     <div style={{ maxWidth: '1200px', margin: '0 auto', padding: '24px 16px' }}>
@@ -120,7 +111,7 @@ const CustomerHome = ({
             Fresh & Healthy Meal Plans 🌱
           </h1>
           <p style={{ margin: 0, fontSize: '14px', opacity: 0.95 }}>
-            Hot meals prepared fresh and delivered directly from partner cloud kitchens.
+            Hot meals prepared fresh and delivered directly from partner cloud kitchens within 10 KM.
           </p>
         </div>
 
@@ -136,7 +127,7 @@ const CustomerHome = ({
             Active Delivery Hub:
           </span>
           <strong style={{ fontSize: '13px' }}>
-            📍 {currentLocation || 'Chittinagar, Krishna (520001)'}
+            📍 {currentLocation}
           </strong>
         </div>
       </div>
@@ -176,8 +167,8 @@ const CustomerHome = ({
         <h2 style={{ margin: 0, fontSize: '20px', color: '#0f172a', fontWeight: '800' }}>
           🥗 Kitchens Delivering to You ({filteredFoods.length})
         </h2>
-        <span style={{ fontSize: '13px', color: '#d97706', fontWeight: '700' }}>
-          ⚡ Sorted by Closest
+        <span style={{ fontSize: '13px', color: '#16a34a', fontWeight: '700' }}>
+          ⚡ Fine-Tuned (&lt;= 10 KM)
         </span>
       </div>
 
@@ -193,10 +184,10 @@ const CustomerHome = ({
         }}>
           <span style={{ fontSize: '48px', display: 'block', marginBottom: '10px' }}>🚚</span>
           <h3 style={{ margin: '0 0 6px 0', color: '#0f172a', fontSize: '18px', fontWeight: '700' }}>
-            No Kitchens Available in this category
+            No Kitchens Delivering within 10 KM
           </h3>
           <p style={{ margin: '0 auto', maxWidth: '520px', fontSize: '13px', lineHeight: '1.5', color: '#64748b' }}>
-            No partner kitchens found for your active filter. Try selecting <strong>🍽️ All Meals</strong>.
+            We currently do not have active partner kitchens within 10 KM of <strong>{currentLocation}</strong>.
           </p>
         </div>
       ) : (
@@ -294,7 +285,7 @@ const CustomerHome = ({
                   <div style={{ display: 'flex', alignItems: 'center', gap: '4px', margin: '0 0 8px 0', color: '#059669', fontSize: '12px', fontWeight: '600' }}>
                     <span>👨‍🍳 {food.sellerName || 'Verified Kitchen'}</span>
                     <span style={{ color: '#cbd5e1' }}>•</span>
-                    <span style={{ color: '#64748b' }}>{food.areaName || food.city || 'Local'}</span>
+                    <span style={{ color: '#64748b' }}>{food.areaName || food.city || 'Local'} ({food.pincode})</span>
                   </div>
                   
                   <p style={{
