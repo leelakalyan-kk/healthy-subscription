@@ -1,303 +1,525 @@
 import React, { useState, useEffect, useContext, useCallback } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import io from 'socket.io-client';
 import { AuthContext } from '../../context/AuthContext';
 
-const socket = io();
+const socket = io(window.location.origin, {
+  transports: ['websocket', 'polling'],
+  reconnection: true,
+  reconnectionAttempts: 10,
+  reconnectionDelay: 1000
+});
 
-const ORDER_STEPS = [
-  { key: 'Order Placed', label: 'Order Confirmed', icon: '📝' },
-  { key: 'Preparing', label: 'Preparing Meal', icon: '🍳' },
-  { key: 'Out for Delivery', label: 'On the Way', icon: '🛵' },
-  { key: 'Delivered', label: 'Delivered', icon: '✅' }
-];
-
-const getStepIndex = (status) => {
-  switch (status) {
-    case 'Order Placed': return 0;
-    case 'Preparing': return 1;
-    case 'Out for Delivery': return 2;
-    case 'Delivered': return 3;
-    case 'Cancelled': return -1;
-    default: return 0;
-  }
-};
-
-const Account = ({ wishlist = [], toggleWishlist, addToCart, currentLocation, setCurrentLocation }) => {
+const Account = () => {
   const { currentUser, logout } = useContext(AuthContext);
-  const location = useLocation();
-  const navigate = useNavigate();
-
-  const [activeTab, setActiveTab] = useState('ordered-items');
+  const [activeTab, setActiveTab] = useState('orders');
+  const [addresses, setAddresses] = useState([]);
   const [orders, setOrders] = useState([]);
-  const [savedAddresses, setSavedAddresses] = useState([]);
-  const [newLabel, setNewLabel] = useState('Home');
-  const [newPin, setNewPin] = useState('');
-  const [detectedArea, setDetectedArea] = useState('');
-  const [newAddress, setNewAddress] = useState('');
-  const [newPhone, setNewPhone] = useState('');
-  const [pinStatus, setPinStatus] = useState('');
+  const [loadingOrders, setLoadingOrders] = useState(true);
+
+  // Wallet & Payment State
+  const [walletBalance, setWalletBalance] = useState(250);
+  const [savedUpi, setSavedUpi] = useState(['kalyan@okhdfcbank', '8074095895@ybl']);
+  const [newUpiInput, setNewUpiInput] = useState('');
+  const [refunds, setRefunds] = useState([
+    { id: 'REF_98124', orderId: '863F94', amount: 54, status: 'Refund Completed', date: '25 Aug 2026', source: 'Healthy Wallet' }
+  ]);
+
+  // Add Address Form State
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [newAddr, setNewAddr] = useState({
+    tag: 'Home',
+    flatNo: '',
+    area: '',
+    landmark: '',
+    city: '',
+    pincode: '',
+    phone: ''
+  });
+
+  const activeUser = currentUser || JSON.parse(localStorage.getItem('active_user') || '{}');
+  const customerName = activeUser.username || activeUser.name || 'kalyan';
+
+  const loadOrders = useCallback(async (isSilent = false) => {
+    if (!isSilent) setLoadingOrders(true);
+    try {
+      const res = await axios.get(`/api/orders/user-orders/${customerName}`);
+      if (Array.isArray(res.data)) {
+        setOrders(res.data);
+      }
+    } catch (err) {
+      console.error("Error loading customer orders:", err);
+    } finally {
+      if (!isSilent) setLoadingOrders(false);
+    }
+  }, [customerName]);
 
   useEffect(() => {
-    const params = new URLSearchParams(location.search);
-    const tabParam = params.get('tab');
-    if (tabParam) setActiveTab(tabParam);
-  }, [location.search]);
+    // 1. Initial Load
+    const saved = JSON.parse(localStorage.getItem(`user_addresses_${customerName}`) || '[]');
+    setAddresses(saved);
+    loadOrders(false);
 
-  const loadCustomerData = useCallback(() => {
-    if (!currentUser) return;
-    const userId = currentUser._id || currentUser.id || currentUser.username;
-    
-    axios.get(`/api/orders/my-orders/${userId}`)
-      .then(res => Array.isArray(res.data) && setOrders(res.data))
-      .catch(console.error);
+    // 2. Auto-Fetch Polling
+    const pollTimer = setInterval(() => {
+      loadOrders(true);
+    }, 3000);
 
-    axios.get(`/api/user/locations/${userId}`)
-      .then(res => Array.isArray(res.data) && setSavedAddresses(res.data))
-      .catch(console.error);
-  }, [currentUser]);
+    // 3. Live Socket.IO Listeners
+    socket.on('order_status_updated', (updatedOrder) => {
+      setOrders(prev =>
+        prev.map(o => (o._id === updatedOrder._id ? updatedOrder : o))
+      );
+    });
 
-  // ⚡ 0-Second Instant Reactive State Updates
-  useEffect(() => {
-    loadCustomerData();
-
-    // Instant status change
-    const onStatusUpdate = (updatedOrder) => {
-      setOrders(prev => prev.map(o => o._id === updatedOrder._id ? updatedOrder : o));
-    };
-
-    // Instant new order arrival
-    const onNewOrder = (newOrder) => {
-      const myId = currentUser?._id || currentUser?.id || currentUser?.username;
-      if (newOrder.userId === myId || newOrder.customerName === currentUser?.username) {
+    socket.on('new_order_placed', (newOrder) => {
+      const isMine =
+        newOrder.customerName?.toLowerCase() === customerName.toLowerCase() ||
+        newOrder.userId === customerName;
+      if (isMine) {
         setOrders(prev => [newOrder, ...prev.filter(o => o._id !== newOrder._id)]);
       }
-    };
-
-    socket.on('order_status_updated', onStatusUpdate);
-    socket.on('new_order_placed', onNewOrder);
+    });
 
     return () => {
-      socket.off('order_status_updated', onStatusUpdate);
-      socket.off('new_order_placed', onNewOrder);
+      clearInterval(pollTimer);
+      socket.off('order_status_updated');
+      socket.off('new_order_placed');
     };
-  }, [currentUser, loadCustomerData]);
+  }, [customerName, loadOrders]);
 
-  const handlePincodeLookup = async (e) => {
-    const pin = e.target.value.replace(/\D/g, '');
-    setNewPin(pin);
-
-    if (pin.length === 6) {
-      setPinStatus('🔍 Locating Area...');
-      try {
-        const res = await fetch(`https://api.postalpincode.in/pincode/${pin}`);
-        const data = await res.json();
-        if (data && data[0]?.Status === 'Success' && data[0].PostOffice?.length > 0) {
-          const po = data[0].PostOffice[0];
-          const areaCity = `${po.Name}, ${po.District}`;
-          setDetectedArea(areaCity);
-          setPinStatus(`✅ Auto-Detected: ${areaCity}`);
-        } else {
-          setPinStatus('❌ Invalid PIN code.');
-        }
-      } catch (err) {
-        setPinStatus('⚠️ PIN code lookup error.');
+  const handleSetActive = (id) => {
+    const updated = addresses.map(addr => {
+      const active = addr.id === id;
+      if (active) {
+        localStorage.setItem('user_delivery_hub', addr.formattedAddress);
       }
-    } else {
-      setPinStatus('');
-    }
+      return { ...addr, isActive: active };
+    });
+    setAddresses(updated);
+    localStorage.setItem(`user_addresses_${customerName}`, JSON.stringify(updated));
+    window.location.reload();
   };
 
-  const handleAddAddress = async (e) => {
+  const handleAddAddress = (e) => {
     e.preventDefault();
-    if (!newAddress || !newPhone) return alert("Please enter full address and phone!");
+    if (!newAddr.flatNo.trim()) return alert('Please enter Flat / House / Door Number');
+    if (!newAddr.area.trim()) return alert('Please enter Area / Street / Locality');
+    if (!newAddr.city.trim()) return alert('Please enter City');
+    if (!newAddr.pincode.trim() || newAddr.pincode.length !== 6) return alert('Please enter a valid 6-digit PIN code');
 
-    const userId = currentUser?._id || currentUser?.id || currentUser?.username || 'user';
-    const fullStreetAddress = `${newAddress}${detectedArea ? `, ${detectedArea}` : ''}${newPin ? ` - ${newPin}` : ''}`;
+    const formattedAddress = `${newAddr.flatNo.trim()}, ${newAddr.area.trim()}${newAddr.landmark.trim() ? `, Near ${newAddr.landmark.trim()}` : ''}, ${newAddr.city.trim()} - ${newAddr.pincode.trim()}`;
 
-    try {
-      const res = await axios.post('/api/user/location/add', {
-        userId,
-        location: { labelName: newLabel, address: fullStreetAddress, pin: newPin, phone: newPhone }
-      });
-      if (res.data?.locations) {
-        setSavedAddresses(res.data.locations);
-        if (setCurrentLocation) {
-          setCurrentLocation(detectedArea ? `${detectedArea} (${newPin})` : (newPin || 'Vijayawada'));
-        }
-        setNewAddress(''); setNewPin(''); setDetectedArea(''); setNewPhone(''); setPinStatus('');
-        alert("🎉 Address Saved!");
-      }
-    } catch (err) {
-      alert("Failed to save address.");
+    const newItem = {
+      id: Date.now().toString(),
+      tag: newAddr.tag,
+      formattedAddress,
+      phone: newAddr.phone.trim() || activeUser.phone || '',
+      isActive: addresses.length === 0
+    };
+
+    const updated = [...addresses, newItem];
+    setAddresses(updated);
+    localStorage.setItem(`user_addresses_${customerName}`, JSON.stringify(updated));
+    if (addresses.length === 0) {
+      localStorage.setItem('user_delivery_hub', formattedAddress);
     }
+
+    setNewAddr({ tag: 'Home', flatNo: '', area: '', landmark: '', city: '', pincode: '', phone: '' });
+    setShowAddForm(false);
+    alert('✅ Delivery address added successfully!');
   };
 
-  const handleSetActiveLocation = async (addr) => {
-    const userId = currentUser?._id || currentUser?.id || currentUser?.username;
-    try {
-      const res = await axios.patch(`/api/user/location/set-active/${userId}/${addr._id}`);
-      if (res.data?.locations) setSavedAddresses(res.data.locations);
-      if (setCurrentLocation && addr.pin) setCurrentLocation(`📍 ${addr.labelName} (${addr.pin})`);
-    } catch (err) {
-      alert("Failed to switch address.");
-    }
+  const handleDeleteAddress = (id) => {
+    if (!window.confirm('Are you sure you want to delete this address?')) return;
+    const updated = addresses.filter(a => a.id !== id);
+    setAddresses(updated);
+    localStorage.setItem(`user_addresses_${customerName}`, JSON.stringify(updated));
   };
 
-  const handleDeleteAddress = async (locationId, label) => {
-    if (!window.confirm(`Delete "${label}" address?`)) return;
-    const userId = currentUser?._id || currentUser?.id || currentUser?.username;
-    try {
-      const res = await axios.delete(`/api/user/location/${userId}/${locationId}`);
-      if (res.data?.locations) setSavedAddresses(res.data.locations);
-    } catch (err) {
-      alert("Failed to delete address.");
-    }
+  const handleAddUpi = (e) => {
+    e.preventDefault();
+    if (!newUpiInput.trim() || !newUpiInput.includes('@')) return alert('Please enter a valid UPI ID (e.g. name@upi)');
+    setSavedUpi([...savedUpi, newUpiInput.trim()]);
+    setNewUpiInput('');
+    alert('✅ UPI ID linked successfully!');
   };
 
-  const navItems = [
-    { id: 'ordered-items', label: '📦 Ordered items & Tracking' },
-    { id: 'address', label: '📍 Delivery Addresses' },
-    { id: 'wishlist', label: '💚 Wish list' },
-    { id: 'payment-options', label: '💳 Payment options' },
-    { id: 'wallet', label: '💰 Wallet' },
-  ];
+  const getBadgeColors = (status) => {
+    switch (status) {
+      case 'Preparing':
+        return { bg: '#fef3c7', text: '#b45309', border: '#fde68a' };
+      case 'Ready for Pickup':
+        return { bg: '#e0f2fe', text: '#0369a1', border: '#bae6fd' };
+      case 'Out for Delivery':
+        return { bg: '#e0e7ff', text: '#3730a3', border: '#c7d2fe' };
+      case 'Delivered':
+        return { bg: '#ecfdf5', text: '#15803d', border: '#86efac' };
+      case 'Cancelled':
+        return { bg: '#fee2e2', text: '#b91c1c', border: '#fca5a5' };
+      default:
+        return { bg: '#f1f5f9', text: '#334155', border: '#cbd5e1' };
+    }
+  };
 
   return (
-    <div style={{ maxWidth: '1100px', margin: '30px auto', padding: '0 20px' }}>
-      <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '16px', padding: '24px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '25px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-          <div style={{ width: '56px', height: '56px', borderRadius: '50%', background: '#ecfdf5', color: '#16a34a', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '24px', fontWeight: 'bold' }}>👤</div>
-          <div>
-            <h2 style={{ margin: 0, fontSize: '22px' }}>{currentUser?.username || 'Customer'}</h2>
-            <p style={{ margin: '4px 0 0 0', color: '#64748b', fontSize: '13px' }}>Active Hub: <strong style={{ color: '#16a34a' }}>📍 {currentLocation}</strong></p>
-          </div>
+    <div style={{ maxWidth: '900px', margin: '0 auto', padding: '20px 14px', boxSizing: 'border-box' }}>
+      
+      {/* Clean Profile Header (Badge Removed) */}
+      <div style={{
+        background: '#0f172a',
+        color: '#ffffff',
+        padding: '20px 24px',
+        borderRadius: '16px',
+        marginBottom: '20px',
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        flexWrap: 'wrap',
+        gap: '12px'
+      }}>
+        <div>
+          <h2 style={{ margin: '0 0 4px 0', fontSize: '20px', fontWeight: '800' }}>
+            👤 {customerName}
+          </h2>
+          <span style={{ fontSize: '12px', color: '#94a3b8' }}>
+            {activeUser.email || 'customer@healthybites.local'} • {activeUser.phone || 'Phone not set'}
+          </span>
         </div>
-        <button onClick={() => { logout(); navigate('/'); }} style={{ background: '#fee2e2', color: '#dc2626', border: '1px solid #fecaca', padding: '8px 18px', borderRadius: '10px', fontWeight: 'bold', cursor: 'pointer' }}>🚪 Logout</button>
+        <button
+          onClick={logout}
+          style={{
+            background: 'rgba(239, 68, 68, 0.2)',
+            color: '#f87171',
+            border: '1px solid rgba(239, 68, 68, 0.3)',
+            padding: '6px 14px',
+            borderRadius: '8px',
+            fontWeight: '700',
+            fontSize: '12px',
+            cursor: 'pointer'
+          }}
+        >
+          🚪 Logout
+        </button>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '260px 1fr', gap: '24px' }}>
-        <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '16px', padding: '12px', height: 'fit-content' }}>
-          {navItems.map(item => (
-            <button
-              key={item.id}
-              onClick={() => { setActiveTab(item.id); navigate(`/account?tab=${item.id}`); }}
-              style={{
-                width: '100%', textAlign: 'left', padding: '12px 16px', borderRadius: '10px', border: 'none',
-                background: activeTab === item.id ? '#ecfdf5' : 'transparent',
-                color: activeTab === item.id ? '#16a34a' : '#475569',
-                fontWeight: activeTab === item.id ? '700' : '500', cursor: 'pointer', marginBottom: '4px'
-              }}
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>
+      {/* Tabs */}
+      <div style={{ display: 'flex', gap: '8px', overflowX: 'auto', borderBottom: '1px solid #e2e8f0', paddingBottom: '12px', marginBottom: '20px' }}>
+        {[
+          { id: 'orders', label: `📦 Orders (${orders.length})` },
+          { id: 'addresses', label: `📍 Saved Addresses (${addresses.length})` },
+          { id: 'payments', label: '💳 Payment Modes' },
+          { id: 'wallet', label: `💰 Wallet (₹${walletBalance})` },
+          { id: 'refunds', label: `🔄 Refunds (${refunds.length})` }
+        ].map(tab => (
+          <button
+            key={tab.id}
+            onClick={() => setActiveTab(tab.id)}
+            style={{
+              padding: '8px 16px',
+              borderRadius: '10px',
+              border: activeTab === tab.id ? '2px solid #16a34a' : '1px solid #cbd5e1',
+              background: activeTab === tab.id ? '#ecfdf5' : '#ffffff',
+              color: activeTab === tab.id ? '#16a34a' : '#475569',
+              fontWeight: '700',
+              fontSize: '13px',
+              cursor: 'pointer',
+              whiteSpace: 'nowrap'
+            }}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
 
-        <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '16px', padding: '24px' }}>
-          {activeTab === 'ordered-items' && (
-            <div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-                <h3 style={{ margin: 0, fontSize: '20px' }}>📦 Live Orders & Instant Tracking</h3>
-                <span style={{ fontSize: '12px', background: '#ecfdf5', color: '#16a34a', padding: '4px 10px', borderRadius: '20px', fontWeight: 'bold', border: '1px solid #86efac' }}>⚡ 0s Instant Sync</span>
-              </div>
-
-              {orders.length === 0 ? (
-                <div style={{ textAlign: 'center', padding: '60px 0', color: '#64748b' }}>
-                  <span style={{ fontSize: '48px' }}>🍲</span>
-                  <p>No orders placed yet.</p>
-                </div>
-              ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
-                  {orders.map(order => {
-                    const activeIndex = getStepIndex(order.orderStatus);
-                    return (
-                      <div key={order._id} style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '14px', padding: '20px' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                          <div>
-                            <strong style={{ fontSize: '16px' }}>Order #{order._id.substring(18)}</strong>
-                            <p style={{ margin: '4px 0 0 0', color: '#64748b', fontSize: '12px' }}>Kitchen: <strong>{order.sellerName}</strong></p>
-                          </div>
-                          <div style={{ textAlign: 'right' }}>
-                            <span style={{ fontSize: '16px', fontWeight: '800', color: '#16a34a' }}>₹{order.totalAmount}</span>
-                          </div>
-                        </div>
-
-                        <div style={{ margin: '20px 0', padding: '16px 12px', background: '#ffffff', borderRadius: '12px', border: '1px solid #e2e8f0' }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', position: 'relative' }}>
-                            <div style={{ position: 'absolute', top: '16px', left: '5%', right: '5%', height: '4px', background: '#e2e8f0', zIndex: 1 }}>
-                              <div style={{ height: '100%', background: '#16a34a', width: `${(activeIndex / (ORDER_STEPS.length - 1)) * 100}%`, transition: 'width 0.3s ease' }} />
-                            </div>
-                            {ORDER_STEPS.map((step, idx) => (
-                              <div key={step.key} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', zIndex: 2, flex: 1 }}>
-                                <div style={{
-                                  width: '34px', height: '34px', borderRadius: '50%',
-                                  background: idx <= activeIndex ? '#16a34a' : '#f1f5f9',
-                                  color: idx <= activeIndex ? '#ffffff' : '#94a3b8',
-                                  display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '14px'
-                                }}>
-                                  {step.icon}
-                                </div>
-                                <span style={{ marginTop: '8px', fontSize: '11px', fontWeight: idx === activeIndex ? '800' : '600', color: idx === activeIndex ? '#16a34a' : '#475569' }}>
-                                  {step.label}
-                                </span>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-
-                        <div style={{ borderTop: '1px solid #e2e8f0', paddingTop: '12px', display: 'flex', justifyContent: 'space-between', fontSize: '13px' }}>
-                          <div><strong>Items: </strong> {order.items?.map(i => `${i.title} (x${i.qty})`).join(', ')}</div>
-                          <div><strong>Drop: </strong> {order.deliveryAddress}</div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
+      {/* 1. ORDERS TAB */}
+      {activeTab === 'orders' && (
+        <div>
+          {loadingOrders ? (
+            <div style={{ textAlign: 'center', padding: '40px', color: '#64748b' }}>
+              <span>🔄 Loading past orders...</span>
             </div>
-          )}
-
-          {activeTab === 'address' && (
-            <div>
-              <h3 style={{ margin: '0 0 20px 0' }}>📍 Delivery Addresses Management</h3>
-              <form onSubmit={handleAddAddress} style={{ background: '#f8fafc', padding: '20px', borderRadius: '14px', border: '1px solid #e2e8f0', marginBottom: '24px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
-                  <input type="text" placeholder="Tag (e.g. Home)" value={newLabel} onChange={e => setNewLabel(e.target.value)} className="form-input" required />
-                  <input type="text" placeholder="Phone Number" value={newPhone} onChange={e => setNewPhone(e.target.value)} className="form-input" required />
-                </div>
-                <input type="text" maxLength="6" placeholder="6-Digit PIN Code" value={newPin} onChange={handlePincodeLookup} className="form-input" />
-                {pinStatus && <p style={{ margin: 0, fontSize: '12px', fontWeight: 'bold' }}>{pinStatus}</p>}
-                <input type="text" placeholder="House / Street / Landmark" value={newAddress} onChange={e => setNewAddress(e.target.value)} className="form-input" required />
-                <button type="submit" className="btn-green" style={{ width: 'fit-content', padding: '8px 22px' }}>Save Address</button>
-              </form>
-
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                {savedAddresses.map(addr => (
-                  <div key={addr._id} style={{ background: addr.isDefault ? '#ecfdf5' : '#ffffff', border: addr.isDefault ? '2px solid #16a34a' : '1px solid #e2e8f0', padding: '16px', borderRadius: '12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <div>
-                      <strong>🏠 {addr.labelName} {addr.isDefault && <span style={{ background: '#16a34a', color: '#fff', padding: '2px 6px', borderRadius: '4px', fontSize: '10px' }}>ACTIVE</span>}</strong>
-                      <p style={{ margin: '4px 0', fontSize: '13px', color: '#475569' }}>{addr.address}</p>
-                      <span style={{ fontSize: '12px', color: '#16a34a' }}>📞 {addr.phone}</span>
+          ) : orders.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: '50px 20px', background: '#fff', borderRadius: '14px', border: '1px dashed #cbd5e1', color: '#64748b' }}>
+              <span style={{ fontSize: '42px', display: 'block', marginBottom: '8px' }}>🍲</span>
+              <h4 style={{ margin: '0 0 4px 0', color: '#0f172a', fontSize: '16px' }}>No orders placed yet</h4>
+              <p style={{ margin: 0, fontSize: '13px' }}>Your ordered healthy meals will appear here.</p>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+              {orders.map(o => {
+                const badge = getBadgeColors(o.orderStatus);
+                return (
+                  <div
+                    key={o._id}
+                    style={{
+                      background: '#ffffff',
+                      border: '1px solid #e2e8f0',
+                      borderRadius: '14px',
+                      padding: '16px',
+                      boxShadow: '0 2px 6px rgba(0,0,0,0.03)'
+                    }}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #f1f5f9', paddingBottom: '10px', marginBottom: '12px' }}>
+                      <div>
+                        <strong style={{ fontSize: '15px', color: '#0f172a' }}>Order #{o._id.slice(-6).toUpperCase()}</strong>
+                        <span style={{ fontSize: '12px', color: '#94a3b8', display: 'block', marginTop: '2px' }}>
+                          📅 {new Date(o.createdAt || Date.now()).toLocaleString()}
+                        </span>
+                      </div>
+                      <div style={{ textAlign: 'right' }}>
+                        <span style={{ fontSize: '17px', fontWeight: '800', color: '#16a34a' }}>₹{o.totalAmount}</span>
+                        <span style={{ display: 'block', fontSize: '11px', color: '#64748b' }}>
+                          {o.paymentType || 'Sandbox Paid'}
+                        </span>
+                      </div>
                     </div>
-                    <div style={{ display: 'flex', gap: '8px' }}>
-                      {!addr.isDefault && (
-                        <button type="button" onClick={() => handleSetActiveLocation(addr)} style={{ background: '#f0fdf4', color: '#15803d', border: '1px solid #86efac', padding: '6px 12px', borderRadius: '8px', cursor: 'pointer' }}>Set Active</button>
-                      )}
-                      <button type="button" onClick={() => handleDeleteAddress(addr._id, addr.labelName)} style={{ background: '#fee2e2', color: '#dc2626', border: '1px solid #fecaca', padding: '6px 12px', borderRadius: '8px', cursor: 'pointer' }}>Delete</button>
+
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '12px' }}>
+                      {o.items?.map((item, idx) => (
+                        <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px', color: '#334155' }}>
+                          <span>🥗 <strong>{item.title}</strong> × {item.qty}</span>
+                          <span style={{ fontWeight: '600', color: '#475569' }}>₹{item.price * item.qty}</span>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div style={{ background: '#f8fafc', borderRadius: '8px', padding: '10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
+                      <div style={{ fontSize: '12px', color: '#475569' }}>
+                        <strong>📍 Delivered To:</strong> {o.deliveryAddress || 'Saved Customer Location'}
+                      </div>
+                      <div>
+                        <span style={{
+                          background: badge.bg,
+                          color: badge.text,
+                          border: `1px solid ${badge.border}`,
+                          padding: '4px 12px',
+                          borderRadius: '20px',
+                          fontSize: '12px',
+                          fontWeight: '800'
+                        }}>
+                          ● {o.orderStatus || 'Order Placed'}
+                        </span>
+                      </div>
                     </div>
                   </div>
-                ))}
-              </div>
+                );
+              })}
             </div>
           )}
-
-          {activeTab === 'wishlist' && <div><h3>💚 Wishlist ({wishlist.length})</h3></div>}
-          {activeTab === 'payment-options' && <div><h3>💳 Payment Options (Sandbox Active)</h3></div>}
-          {activeTab === 'wallet' && <div><h3>💰 Wallet Balance: ₹{currentUser?.walletBalance || 250}</h3></div>}
         </div>
-      </div>
+      )}
+
+      {/* 2. SAVED ADDRESSES TAB */}
+      {activeTab === 'addresses' && (
+        <div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+            <h3 style={{ margin: 0, fontSize: '15px', color: '#0f172a' }}>Saved Delivery Locations</h3>
+            <button
+              onClick={() => setShowAddForm(!showAddForm)}
+              style={{
+                background: '#16a34a',
+                color: '#fff',
+                border: 'none',
+                padding: '6px 14px',
+                borderRadius: '8px',
+                fontSize: '12px',
+                fontWeight: '700',
+                cursor: 'pointer'
+              }}
+            >
+              {showAddForm ? '✕ Close Form' : '➕ Add New Address'}
+            </button>
+          </div>
+
+          {showAddForm && (
+            <form onSubmit={handleAddAddress} style={{ background: '#fff', border: '1px solid #e2e8f0', padding: '16px', borderRadius: '14px', marginBottom: '16px' }}>
+              <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
+                {['Home', 'Work', 'Friends & Family', 'Other'].map(tag => (
+                  <button
+                    type="button"
+                    key={tag}
+                    onClick={() => setNewAddr({ ...newAddr, tag })}
+                    style={{
+                      padding: '4px 12px',
+                      borderRadius: '16px',
+                      border: newAddr.tag === tag ? '2px solid #16a34a' : '1px solid #cbd5e1',
+                      background: newAddr.tag === tag ? '#ecfdf5' : '#f8fafc',
+                      color: newAddr.tag === tag ? '#16a34a' : '#475569',
+                      fontSize: '11px',
+                      fontWeight: '700',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    {tag}
+                  </button>
+                ))}
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '10px' }}>
+                <input type="text" placeholder="Flat / House / Door No *" value={newAddr.flatNo} onChange={e => setNewAddr({ ...newAddr, flatNo: e.target.value })} style={{ padding: '8px 10px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '12px' }} required />
+                <input type="text" placeholder="Area / Street / Locality *" value={newAddr.area} onChange={e => setNewAddr({ ...newAddr, area: e.target.value })} style={{ padding: '8px 10px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '12px' }} required />
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '10px', marginBottom: '10px' }}>
+                <input type="text" placeholder="Landmark (Optional)" value={newAddr.landmark} onChange={e => setNewAddr({ ...newAddr, landmark: e.target.value })} style={{ padding: '8px 10px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '12px' }} />
+                <input type="text" placeholder="City *" value={newAddr.city} onChange={e => setNewAddr({ ...newAddr, city: e.target.value })} style={{ padding: '8px 10px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '12px' }} required />
+                <input type="text" placeholder="Pincode (6-digit) *" maxLength="6" value={newAddr.pincode} onChange={e => setNewAddr({ ...newAddr, pincode: e.target.value })} style={{ padding: '8px 10px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '12px' }} required />
+              </div>
+
+              <div style={{ display: 'flex', gap: '10px' }}>
+                <input type="tel" placeholder="Receiver Mobile No" value={newAddr.phone} onChange={e => setNewAddr({ ...newAddr, phone: e.target.value })} style={{ flex: 1, padding: '8px 10px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '12px' }} />
+                <button type="submit" style={{ background: '#16a34a', color: '#fff', border: 'none', padding: '8px 18px', borderRadius: '6px', fontWeight: '700', fontSize: '12px', cursor: 'pointer' }}>Save Address</button>
+              </div>
+            </form>
+          )}
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            {addresses.map(addr => (
+              <div
+                key={addr.id}
+                style={{
+                  background: '#ffffff',
+                  border: addr.isActive ? '2px solid #16a34a' : '1px solid #e2e8f0',
+                  borderRadius: '12px',
+                  padding: '16px',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  boxShadow: '0 2px 6px rgba(0,0,0,0.02)'
+                }}
+              >
+                <div style={{ flex: 1, paddingRight: '12px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
+                    <strong style={{ fontSize: '14px', color: '#0f172a' }}>
+                      {addr.tag === 'Home' ? '🏠 Home' : addr.tag === 'Work' ? '💼 Work' : '📍 ' + (addr.tag || 'Address')}
+                    </strong>
+                    {addr.isActive && (
+                      <span style={{ background: '#16a34a', color: '#fff', fontSize: '10px', padding: '3px 8px', borderRadius: '12px', fontWeight: '800' }}>
+                        ACTIVE DELIVER TO
+                      </span>
+                    )}
+                  </div>
+                  <p style={{ margin: '0 0 6px 0', fontSize: '13px', color: '#334155', lineHeight: '1.4' }}>
+                    {addr.formattedAddress}
+                  </p>
+                  {addr.phone && <span style={{ fontSize: '12px', color: '#64748b' }}>📞 {addr.phone}</span>}
+                </div>
+
+                <div style={{ display: 'flex', gap: '8px', flexShrink: 0 }}>
+                  {!addr.isActive && (
+                    <button
+                      onClick={() => handleSetActive(addr.id)}
+                      style={{ background: '#ecfdf5', color: '#16a34a', border: '1px solid #86efac', padding: '6px 14px', borderRadius: '6px', fontWeight: '700', fontSize: '12px', cursor: 'pointer' }}
+                    >
+                      Deliver Here
+                    </button>
+                  )}
+                  <button
+                    onClick={() => handleDeleteAddress(addr.id)}
+                    style={{ background: '#fee2e2', color: '#dc2626', border: 'none', padding: '6px 12px', borderRadius: '6px', fontSize: '12px', fontWeight: '700', cursor: 'pointer' }}
+                  >
+                    🗑️ Delete
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* 3. PAYMENT MODES TAB */}
+      {activeTab === 'payments' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: '14px', padding: '18px' }}>
+            <h4 style={{ margin: '0 0 12px 0', fontSize: '14px', color: '#0f172a' }}>⚡ Saved UPI IDs (1-Click Pay)</h4>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '14px' }}>
+              {savedUpi.map((upi, idx) => (
+                <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 12px', background: '#f8fafc', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+                  <span style={{ fontSize: '13px', fontWeight: '600', color: '#334155' }}>📱 {upi}</span>
+                  <span style={{ fontSize: '11px', color: '#16a34a', fontWeight: '700' }}>Verified</span>
+                </div>
+              ))}
+            </div>
+
+            <form onSubmit={handleAddUpi} style={{ display: 'flex', gap: '8px' }}>
+              <input
+                type="text"
+                placeholder="Enter new UPI ID (e.g. mobile@upi)"
+                value={newUpiInput}
+                onChange={e => setNewUpiInput(e.target.value)}
+                style={{ flex: 1, padding: '8px 12px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '12px' }}
+              />
+              <button type="submit" style={{ background: '#16a34a', color: '#fff', border: 'none', padding: '8px 16px', borderRadius: '6px', fontWeight: '700', fontSize: '12px', cursor: 'pointer' }}>
+                Link UPI
+              </button>
+            </form>
+          </div>
+
+          <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: '14px', padding: '18px' }}>
+            <h4 style={{ margin: '0 0 12px 0', fontSize: '14px', color: '#0f172a' }}>💳 Saved Debit & Credit Cards</h4>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px', background: '#f8fafc', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+              <div>
+                <strong style={{ fontSize: '13px', color: '#0f172a' }}>HDFC Bank Visa Card</strong>
+                <span style={{ display: 'block', fontSize: '12px', color: '#64748b' }}>•••• •••• •••• 4012 (Exp: 12/28)</span>
+              </div>
+              <span style={{ background: '#ecfdf5', color: '#16a34a', padding: '2px 8px', borderRadius: '6px', fontSize: '10px', fontWeight: '700' }}>Sandbox Tokenized</span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 4. WALLET TAB */}
+      {activeTab === 'wallet' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+          <div style={{ background: 'linear-gradient(135deg, #0f172a 0%, #1e293b 100%)', color: '#fff', padding: '24px', borderRadius: '16px' }}>
+            <span style={{ fontSize: '12px', color: '#94a3b8', fontWeight: '600' }}>HEALTHYBITES WALLET BALANCE</span>
+            <div style={{ fontSize: '32px', fontWeight: '800', margin: '6px 0 16px 0', color: '#4ade80' }}>
+              ₹{walletBalance}.00
+            </div>
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <button
+                onClick={() => { setWalletBalance(b => b + 200); alert('✅ ₹200 added to wallet!'); }}
+                style={{ background: '#16a34a', color: '#fff', border: 'none', padding: '8px 16px', borderRadius: '8px', fontWeight: '700', fontSize: '12px', cursor: 'pointer' }}
+              >
+                + Top-up ₹200
+              </button>
+            </div>
+          </div>
+
+          <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: '14px', padding: '18px' }}>
+            <h4 style={{ margin: '0 0 10px 0', fontSize: '14px', color: '#0f172a' }}>⚡ Wallet Benefits</h4>
+            <ul style={{ margin: 0, paddingLeft: '20px', fontSize: '13px', color: '#475569', lineHeight: '1.6' }}>
+              <li><strong>Zero OTP Checkout:</strong> 1-Click instant payments on lunch & dinner meal plans.</li>
+              <li><strong>Instant Refunds:</strong> Cancelled orders are instantly credited back to your wallet.</li>
+            </ul>
+          </div>
+        </div>
+      )}
+
+      {/* 5. REFUNDS TAB */}
+      {activeTab === 'refunds' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          {refunds.map(r => (
+            <div key={r.id} style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: '12px', padding: '16px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
+                <div>
+                  <strong style={{ fontSize: '14px', color: '#0f172a' }}>Refund for Order #{r.orderId}</strong>
+                  <span style={{ display: 'block', fontSize: '11px', color: '#94a3b8' }}>📅 {r.date} • Ref: {r.id}</span>
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <span style={{ fontSize: '16px', fontWeight: '800', color: '#16a34a' }}>+₹{r.amount}</span>
+                  <span style={{ display: 'block', fontSize: '11px', color: '#64748b' }}>To {r.source}</span>
+                </div>
+              </div>
+              <div style={{ marginTop: '8px', background: '#ecfdf5', padding: '4px 10px', borderRadius: '6px', fontSize: '11px', color: '#16a34a', fontWeight: '700', display: 'inline-block' }}>
+                ● {r.status}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
     </div>
   );
 };

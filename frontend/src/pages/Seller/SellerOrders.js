@@ -9,23 +9,18 @@ const socket = io(window.location.origin, {
 
 const KitchenDashboard = () => {
   const { currentUser, logout } = useContext(AuthContext);
-  const [activeTab, setActiveTab] = useState('orders'); // 'orders' | 'menu' | 'withdraw'
+  const [activeTab, setActiveTab] = useState('orders');
   const [orderFilter, setOrderFilter] = useState('ALL');
-
+  
   const activeUser = currentUser || JSON.parse(localStorage.getItem('active_user') || '{}');
   const sellerIdentifier = activeUser._id || activeUser.id || activeUser.username || 'tests';
 
   const [isKitchenOnline, setIsKitchenOnline] = useState(() => {
     return localStorage.getItem(`kitchen_online_${sellerIdentifier}`) !== 'false';
   });
-
+  
   const [orders, setOrders] = useState([]);
   const [foods, setFoods] = useState([]);
-  const [withdrawals, setWithdrawals] = useState([]);
-  const [withdrawAmount, setWithdrawAmount] = useState('');
-  const [payoutUpi, setPayoutUpi] = useState('kalyan@okhdfcbank');
-  const [isSubmittingWithdraw, setIsSubmittingWithdraw] = useState(false);
-
   const [showAddDish, setShowAddDish] = useState(false);
   const [updatingId, setUpdatingId] = useState(null);
   const [editingDishId, setEditingDishId] = useState(null);
@@ -65,26 +60,13 @@ const KitchenDashboard = () => {
     }
   }, []);
 
-  const fetchWithdrawals = useCallback(async () => {
-    try {
-      const res = await axios.get(`/api/withdraw/history/${sellerIdentifier}`);
-      if (Array.isArray(res.data)) {
-        setWithdrawals(res.data);
-      }
-    } catch (err) {
-      console.error('Error fetching withdrawals:', err);
-    }
-  }, [sellerIdentifier]);
-
   useEffect(() => {
     fetchOrders();
     fetchFoods();
-    fetchWithdrawals();
 
     const interval = setInterval(() => {
       fetchOrders();
       fetchFoods();
-      fetchWithdrawals();
     }, 3000);
 
     socket.on('new_order_placed', (order) => {
@@ -105,19 +87,14 @@ const KitchenDashboard = () => {
       setFoods((prev) => prev.map((f) => (f._id === updatedDish._id ? updatedDish : f)));
     });
 
-    socket.on('withdrawal_requested', (w) => {
-      setWithdrawals(prev => [w, ...prev.filter(item => item._id !== w._id)]);
-    });
-
     return () => {
       clearInterval(interval);
       socket.off('new_order_placed');
       socket.off('order_status_updated');
       socket.off('food_added');
       socket.off('food_updated');
-      socket.off('withdrawal_requested');
     };
-  }, [fetchOrders, fetchFoods, fetchWithdrawals]);
+  }, [fetchOrders, fetchFoods]);
 
   const toggleKitchenOnline = () => {
     const nextState = !isKitchenOnline;
@@ -142,51 +119,21 @@ const KitchenDashboard = () => {
     }
   };
 
-  const handleRequestWithdraw = async (e) => {
-    e.preventDefault();
-    if (!withdrawAmount || Number(withdrawAmount) <= 0) return alert('Please enter a valid payout amount');
-    setIsSubmittingWithdraw(true);
-
-    try {
-      const res = await axios.post('/api/withdraw/request', {
-        sellerId: sellerIdentifier,
-        amount: Number(withdrawAmount),
-        upiId: payoutUpi
-      });
-
-      if (res.data?.success) {
-        setWithdrawals(prev => [res.data.withdrawal, ...prev]);
-        setWithdrawAmount('');
-        alert('✅ Withdrawal request submitted! Reference: ' + res.data.withdrawal.referenceId);
-      }
-    } catch (err) {
-      alert('Withdrawal request failed: ' + (err.response?.data?.message || err.message));
-    } finally {
-      setIsSubmittingWithdraw(false);
-    }
-  };
-
   const stats = useMemo(() => {
     const totalRevenue = orders
       .filter(o => o.orderStatus !== 'Cancelled')
       .reduce((sum, o) => sum + (Number(o.totalAmount) || 0), 0);
-
-    const totalWithdrawn = withdrawals
-      .reduce((sum, w) => sum + (Number(w.amount) || 0), 0);
-
-    const availableBalance = Math.max(0, totalRevenue - totalWithdrawn);
+    
     const activeCount = orders.filter(o => ['Order Placed', 'Preparing', 'Ready for Pickup'].includes(o.orderStatus || 'Order Placed')).length;
     const completedCount = orders.filter(o => ['Delivered', 'Completed'].includes(o.orderStatus)).length;
-
+    
     return {
       revenue: totalRevenue,
-      withdrawn: totalWithdrawn,
-      available: availableBalance,
       active: activeCount,
       completed: completedCount,
       totalDishes: foods.length
     };
-  }, [orders, foods, withdrawals]);
+  }, [orders, foods]);
 
   const filteredOrders = useMemo(() => {
     return orders.filter(o => {
@@ -228,7 +175,7 @@ const KitchenDashboard = () => {
         sellerId: sellerIdentifier,
         sellerName: activeUser.username || 'tests'
       });
-
+      
       if (res.data?.success) {
         setFoods(prev => [res.data.food, ...prev]);
         setShowAddDish(false);
@@ -244,8 +191,11 @@ const KitchenDashboard = () => {
           isAvailable: true
         });
         alert('✅ Dish published successfully!');
+      } else {
+        alert('Error: ' + JSON.stringify(res.data));
       }
     } catch (err) {
+      console.error('Error adding dish:', err);
       alert('Upload failed: ' + (err.response?.data?.error || err.message));
     }
   };
@@ -257,6 +207,7 @@ const KitchenDashboard = () => {
         setFoods(prev => prev.map(f => f._id === dishId ? { ...f, isAvailable: !currentStatus } : f));
       }
     } catch (err) {
+      console.error('Error toggling stock:', err);
       alert('Stock update failed: ' + err.message);
     }
   };
@@ -273,6 +224,7 @@ const KitchenDashboard = () => {
         alert('✅ Dish updated successfully!');
       }
     } catch (err) {
+      console.error('Error saving dish:', err);
       alert('Edit save failed: ' + err.message);
     }
   };
@@ -305,7 +257,7 @@ const KitchenDashboard = () => {
 
   return (
     <div style={{ maxWidth: '1100px', margin: '0 auto', padding: '20px 14px', boxSizing: 'border-box' }}>
-
+      
       {/* Header */}
       <div style={{
         background: '#0f172a',
@@ -339,7 +291,7 @@ const KitchenDashboard = () => {
             👨‍🍳 {activeUser.username || 'tests'} Operations Desk
           </h2>
           <span style={{ fontSize: '12px', color: '#94a3b8' }}>
-            Live Kitchen Operations, Real-Time Orders & Payout Desk
+            Live Kitchen Operations & Real-Time Order Management
           </span>
         </div>
 
@@ -378,40 +330,40 @@ const KitchenDashboard = () => {
         </div>
       </div>
 
-      {/* Metrics Row */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '14px', marginBottom: '22px' }}>
+      {/* Metrics */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '14px', marginBottom: '22px' }}>
         <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', padding: '16px 18px', borderRadius: '14px' }}>
           <span style={{ fontSize: '12px', color: '#64748b', fontWeight: '700' }}>💰 TOTAL REVENUE</span>
-          <div style={{ fontSize: '22px', fontWeight: '800', color: '#0f172a', marginTop: '4px' }}>₹{stats.revenue}</div>
-          <span style={{ fontSize: '11px', color: '#94a3b8' }}>Gross lifetime sales</span>
-        </div>
-
-        <div style={{ background: '#ecfdf5', border: '2px solid #86efac', padding: '16px 18px', borderRadius: '14px' }}>
-          <span style={{ fontSize: '12px', color: '#15803d', fontWeight: '700' }}>⚡ WITHDRAWABLE BALANCE</span>
-          <div style={{ fontSize: '22px', fontWeight: '800', color: '#16a34a', marginTop: '4px' }}>₹{stats.available}</div>
-          <span style={{ fontSize: '11px', color: '#15803d' }}>Ready for Instant Payout</span>
+          <div style={{ fontSize: '24px', fontWeight: '800', color: '#16a34a', marginTop: '4px' }}>₹{stats.revenue}</div>
+          <span style={{ fontSize: '11px', color: '#94a3b8' }}>Total sales</span>
         </div>
 
         <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', padding: '16px 18px', borderRadius: '14px' }}>
           <span style={{ fontSize: '12px', color: '#64748b', fontWeight: '700' }}>⚡ ACTIVE ORDERS</span>
-          <div style={{ fontSize: '22px', fontWeight: '800', color: '#0284c7', marginTop: '4px' }}>{stats.active}</div>
+          <div style={{ fontSize: '24px', fontWeight: '800', color: '#0284c7', marginTop: '4px' }}>{stats.active}</div>
           <span style={{ fontSize: '11px', color: '#94a3b8' }}>Live in-kitchen orders</span>
         </div>
 
         <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', padding: '16px 18px', borderRadius: '14px' }}>
+          <span style={{ fontSize: '12px', color: '#64748b', fontWeight: '700' }}>✅ DELIVERED ORDERS</span>
+          <div style={{ fontSize: '24px', fontWeight: '800', color: '#0f172a', marginTop: '4px' }}>{stats.completed}</div>
+          <span style={{ fontSize: '11px', color: '#94a3b8' }}>Fulfilled meal orders</span>
+        </div>
+
+        <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', padding: '16px 18px', borderRadius: '14px' }}>
           <span style={{ fontSize: '12px', color: '#64748b', fontWeight: '700' }}>🍽️ LIVE DISHES</span>
-          <div style={{ fontSize: '22px', fontWeight: '800', color: '#8b5cf6', marginTop: '4px' }}>{stats.totalDishes}</div>
+          <div style={{ fontSize: '24px', fontWeight: '800', color: '#8b5cf6', marginTop: '4px' }}>{stats.totalDishes}</div>
           <span style={{ fontSize: '11px', color: '#94a3b8' }}>Live catalogue items</span>
         </div>
       </div>
 
       {/* Tabs */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #e2e8f0', paddingBottom: '12px', marginBottom: '16px' }}>
-        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: '8px' }}>
           <button
             onClick={() => { setActiveTab('orders'); setShowAddDish(false); }}
             style={{
-              padding: '8px 18px',
+              padding: '8px 20px',
               borderRadius: '10px',
               border: activeTab === 'orders' ? '2px solid #16a34a' : '1px solid #cbd5e1',
               background: activeTab === 'orders' ? '#ecfdf5' : '#fff',
@@ -426,7 +378,7 @@ const KitchenDashboard = () => {
           <button
             onClick={() => { setActiveTab('menu'); setShowAddDish(false); }}
             style={{
-              padding: '8px 18px',
+              padding: '8px 20px',
               borderRadius: '10px',
               border: activeTab === 'menu' ? '2px solid #16a34a' : '1px solid #cbd5e1',
               background: activeTab === 'menu' ? '#ecfdf5' : '#fff',
@@ -437,21 +389,6 @@ const KitchenDashboard = () => {
             }}
           >
             🍽️ Menu Management ({foods.length})
-          </button>
-          <button
-            onClick={() => { setActiveTab('withdraw'); setShowAddDish(false); }}
-            style={{
-              padding: '8px 18px',
-              borderRadius: '10px',
-              border: activeTab === 'withdraw' ? '2px solid #16a34a' : '1px solid #cbd5e1',
-              background: activeTab === 'withdraw' ? '#ecfdf5' : '#fff',
-              color: activeTab === 'withdraw' ? '#16a34a' : '#475569',
-              fontWeight: '800',
-              fontSize: '13px',
-              cursor: 'pointer'
-            }}
-          >
-            💸 Withdraw & Payouts ({withdrawals.length})
           </button>
         </div>
 
@@ -474,7 +411,7 @@ const KitchenDashboard = () => {
         )}
       </div>
 
-      {/* 1. ORDERS TAB */}
+      {/* 1. ORDERS */}
       {activeTab === 'orders' && (
         <div>
           <div style={{ display: 'flex', gap: '6px', overflowX: 'auto', paddingBottom: '10px', marginBottom: '16px' }}>
@@ -587,13 +524,13 @@ const KitchenDashboard = () => {
         </div>
       )}
 
-      {/* 2. MENU MANAGEMENT TAB */}
+      {/* 2. MENU MANAGEMENT */}
       {activeTab === 'menu' && (
         <div>
           {showAddDish && (
             <form onSubmit={handleAddDish} style={{ background: '#ffffff', border: '2px solid #16a34a', borderRadius: '14px', padding: '20px', marginBottom: '22px', boxShadow: '0 4px 12px rgba(0,0,0,0.06)' }}>
               <h4 style={{ margin: '0 0 14px 0', fontSize: '16px', color: '#0f172a', fontWeight: '800' }}>➕ Add New Dish</h4>
-
+              
               <div style={{ marginBottom: '14px' }}>
                 <span style={{ display: 'block', fontSize: '12px', fontWeight: '700', color: '#334155', marginBottom: '6px' }}>Category:</span>
                 <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
@@ -672,7 +609,32 @@ const KitchenDashboard = () => {
                   </div>
                 )}
               </div>
-
+              
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '10px', marginBottom: '16px' }}>
+                <input
+                  type="text"
+                  placeholder="Area (Optional)"
+                  value={dish.areaName}
+                  onChange={(e) => setDish({ ...dish, areaName: e.target.value })}
+                  style={{ width: '100%', padding: '8px 10px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '12px', boxSizing: 'border-box' }}
+                />
+                <input
+                  type="text"
+                  placeholder="City (Optional)"
+                  value={dish.city}
+                  onChange={(e) => setDish({ ...dish, city: e.target.value })}
+                  style={{ width: '100%', padding: '8px 10px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '12px', boxSizing: 'border-box' }}
+                />
+                <input
+                  type="text"
+                  placeholder="Pincode (Optional)"
+                  maxLength="6"
+                  value={dish.pincode}
+                  onChange={(e) => setDish({ ...dish, pincode: e.target.value })}
+                  style={{ width: '100%', padding: '8px 10px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '12px', boxSizing: 'border-box' }}
+                />
+              </div>
+              
               <button
                 type="submit"
                 style={{
@@ -809,122 +771,6 @@ const KitchenDashboard = () => {
               );
             })}
           </div>
-        </div>
-      )}
-
-      {/* 3. WITHDRAW & PAYOUTS TAB */}
-      {activeTab === 'withdraw' && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-          
-          {/* Request Form */}
-          <div style={{ background: '#ffffff', border: '2px solid #16a34a', borderRadius: '16px', padding: '24px', boxShadow: '0 4px 15px rgba(0,0,0,0.04)' }}>
-            <h3 style={{ margin: '0 0 6px 0', fontSize: '18px', fontWeight: '800', color: '#0f172a' }}>
-              💸 Request Kitchen Revenue Payout
-            </h3>
-            <p style={{ margin: '0 0 16px 0', fontSize: '13px', color: '#64748b' }}>
-              Transfer your earned meal revenue directly to your linked UPI ID or Bank Account.
-            </p>
-
-            <form onSubmit={handleRequestWithdraw} style={{ display: 'grid', gridTemplateColumns: '1.2fr 1.5fr 1fr', gap: '12px', alignItems: 'flex-end' }}>
-              <div>
-                <label style={{ display: 'block', fontSize: '12px', fontWeight: '700', color: '#334155', marginBottom: '6px' }}>
-                  Payout Amount (₹) *
-                </label>
-                <input
-                  type="number"
-                  placeholder={`Max ₹${stats.available}`}
-                  value={withdrawAmount}
-                  max={stats.available > 0 ? stats.available : 999999}
-                  onChange={e => setWithdrawAmount(e.target.value)}
-                  style={{ width: '100%', padding: '10px 12px', borderRadius: '8px', border: '1px solid #cbd5e1', fontSize: '14px', boxSizing: 'border-box' }}
-                  required
-                />
-              </div>
-
-              <div>
-                <label style={{ display: 'block', fontSize: '12px', fontWeight: '700', color: '#334155', marginBottom: '6px' }}>
-                  Receiver UPI ID *
-                </label>
-                <input
-                  type="text"
-                  placeholder="e.g. kitchen@upi"
-                  value={payoutUpi}
-                  onChange={e => setPayoutUpi(e.target.value)}
-                  style={{ width: '100%', padding: '10px 12px', borderRadius: '8px', border: '1px solid #cbd5e1', fontSize: '14px', boxSizing: 'border-box' }}
-                  required
-                />
-              </div>
-
-              <div>
-                <button
-                  type="submit"
-                  disabled={isSubmittingWithdraw}
-                  style={{
-                    width: '100%',
-                    background: '#16a34a',
-                    color: '#ffffff',
-                    border: 'none',
-                    padding: '11px',
-                    borderRadius: '8px',
-                    fontWeight: '800',
-                    fontSize: '13px',
-                    cursor: 'pointer'
-                  }}
-                >
-                  {isSubmittingWithdraw ? 'Processing...' : '⚡ Instant Withdraw'}
-                </button>
-              </div>
-            </form>
-          </div>
-
-          {/* Withdrawals History */}
-          <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '16px', padding: '20px' }}>
-            <h4 style={{ margin: '0 0 14px 0', fontSize: '16px', fontWeight: '800', color: '#0f172a' }}>
-              📑 Payouts & Settlement History ({withdrawals.length})
-            </h4>
-
-            {withdrawals.length === 0 ? (
-              <div style={{ textAlign: 'center', padding: '40px 10px', color: '#64748b' }}>
-                <span>No withdrawal payouts requested yet.</span>
-              </div>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                {withdrawals.map((w) => (
-                  <div
-                    key={w._id}
-                    style={{
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      padding: '14px 16px',
-                      background: '#f8fafc',
-                      borderRadius: '10px',
-                      border: '1px solid #e2e8f0'
-                    }}
-                  >
-                    <div>
-                      <strong style={{ fontSize: '14px', color: '#0f172a' }}>
-                        Ref #{w.referenceId || w._id.slice(-6).toUpperCase()}
-                      </strong>
-                      <span style={{ display: 'block', fontSize: '12px', color: '#64748b', marginTop: '2px' }}>
-                        Transfer to: <strong>{w.payoutDetails || 'UPI ID'}</strong> • {new Date(w.requestedAt || Date.now()).toLocaleString()}
-                      </span>
-                    </div>
-
-                    <div style={{ textAlign: 'right' }}>
-                      <span style={{ fontSize: '16px', fontWeight: '800', color: '#16a34a' }}>
-                        ₹{w.amount}
-                      </span>
-                      <span style={{ display: 'block', fontSize: '11px', background: '#ecfdf5', color: '#16a34a', padding: '2px 8px', borderRadius: '10px', fontWeight: '700', marginTop: '3px' }}>
-                        ● {w.status || 'Completed'}
-                      </span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-
         </div>
       )}
 
