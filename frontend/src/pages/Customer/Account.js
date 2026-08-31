@@ -29,7 +29,7 @@ const Account = () => {
   const [subscriptions, setSubscriptions] = useState([]);
   const [menuFoods, setMenuFoods] = useState([]);
 
-  // Wallet State with persistent storage key
+  // Persistent Wallet State
   const [walletBalance, setWalletBalance] = useState(() => {
     const saved = localStorage.getItem(`wallet_${userIdentifier}`);
     if (saved !== null) return Number(saved);
@@ -51,7 +51,7 @@ const Account = () => {
   const [showAddAddress, setShowAddAddress] = useState(false);
   const [newAddr, setNewAddr] = useState({ type: 'Home', flat: '', street: '', landmark: '', area: '', city: 'Vijayawada', pin: '520002' });
 
-  // Tomorrow Meal Customizer State
+  // Tomorrow Meal Customizer
   const [customizingSub, setCustomizingSub] = useState(null);
   const [chosenMeal, setChosenMeal] = useState('');
   const [isSavingMeal, setIsSavingMeal] = useState(false);
@@ -62,7 +62,7 @@ const Account = () => {
   const [reviewComment, setReviewComment] = useState('');
   const [isSubmittingReview, setIsSubmittingReview] = useState(false);
 
-  // Subscription Modal & Form State
+  // Subscription Creation State
   const [showSubModal, setShowSubModal] = useState(false);
   const [planDuration, setPlanDuration] = useState(7);
   const [selectedTier, setSelectedTier] = useState(MEAL_TIERS[0]);
@@ -329,7 +329,7 @@ const Account = () => {
     const totalAmount = planDuration * rate;
 
     if (paymentMode === 'wallet' && walletBalance < totalAmount) {
-      alert(`⚠️ Insufficient Wallet Balance (₹${walletBalance}). Please Top-Up from Wallet tab or choose UPI/Card.`);
+      alert(`⚠️ Insufficient Wallet Balance (₹${walletBalance}). Please Top-Up from Wallet tab or choose UPI.`);
       return;
     }
 
@@ -349,7 +349,7 @@ const Account = () => {
         durationDays: planDuration,
         defaultDish: defaultMeal,
         transactionId: txnId,
-        paymentMethod: paymentMode === 'wallet' ? 'HealthyBites Wallet' : paymentMode === 'upi' ? `Sandbox UPI (${upiId})` : 'Sandbox Card',
+        paymentMethod: paymentMode === 'wallet' ? 'HealthyBites Wallet' : `Sandbox UPI (${upiId})`,
         paymentStatus: 'PAID',
         items: [{ title: `${selectedTier.name} (₹${rate}/day)`, qty: planDuration, price: rate }],
         totalAmount: totalAmount,
@@ -1013,7 +1013,8 @@ const Account = () => {
                 placeholder="Delicious, fresh, high protein, perfectly cooked..."
                 value={reviewComment}
                 onChange={(e) => setReviewComment(e.target.value)}
-                style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #cbd5e1', fontSize: '13px', boxSizing: 'border-box', minHeight: '80px' }}
+                style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #cbd5e1', fontSize: '13px', boxSizing: 'border-box' }}
+                rows="3"
                 required
               />
             </div>

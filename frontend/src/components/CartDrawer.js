@@ -58,7 +58,7 @@ const CartDrawer = ({ isOpen, onClose, cart = [], updateQuantity, currentLocatio
     if (rawCart.length === 0 || isPlacing) return;
 
     if (undeliverableItems.length > 0) {
-      alert(`⚠️ Location Out-of-Range!\n\n"${undeliverableItems.map(i => i.title).join(', ')}" is not delivered to "${selectedAddress}".\n\nPlease select a matching delivery hub or remove the item.`);
+      alert(`⚠️ Location Out-of-Range!\n\n"${undeliverableItems.map(i => i.title).join(', ')}" cannot be delivered to "${selectedAddress}".\n\nPlease choose a matching local hub or remove the item.`);
       return;
     }
 
