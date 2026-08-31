@@ -1,338 +1,322 @@
-import React, { useState } from 'react';
+import React, { useState, useContext, useEffect, useMemo } from 'react';
+import { AuthContext } from '../context/AuthContext';
 import axios from 'axios';
+import { isDeliverable } from '../utils/geoMapper';
 
 const CartDrawer = ({ isOpen, onClose, cart = [], updateQuantity, currentLocation }) => {
-  const [selectedMethod, setSelectedMethod] = useState('UPI');
-  const [upiId, setUpiId] = useState('kalyan@okhdfcbank');
-  const [cardNumber, setCardNumber] = useState('4111 2222 3333 4444');
-  const [cardExpiry, setCardExpiry] = useState('12/28');
-  const [cardCvv, setCardCvv] = useState('123');
-  const [isCheckingOut, setIsCheckingOut] = useState(false);
-  const [paymentSuccess, setPaymentSuccess] = useState(null);
+  const { currentUser } = useContext(AuthContext);
+  const user = currentUser || JSON.parse(localStorage.getItem('active_user') || '{}');
+  const userIdentifier = user._id || user.id || user.username || 'user_1';
+
+  const [addresses, setAddresses] = useState(() => {
+    return JSON.parse(localStorage.getItem(`user_addresses_${userIdentifier}`) || '[]');
+  });
+
+  const [selectedAddress, setSelectedAddress] = useState(() => {
+    return currentLocation?.replace(/📍/g, '').trim() || localStorage.getItem('user_delivery_hub')?.replace(/📍/g, '').trim() || 'Vijayawada';
+  });
+
+  const [walletBalance, setWalletBalance] = useState(() => {
+    const saved = localStorage.getItem(`wallet_${userIdentifier}`);
+    return saved !== null ? Number(saved) : 250;
+  });
+
+  const [paymentMode, setPaymentMode] = useState('wallet');
+  const [upiId, setUpiId] = useState(user.email ? `${user.username || 'user'}@okhdfcbank` : 'customer@okhdfcbank');
+  const [isPlacing, setIsPlacing] = useState(false);
+
+  useEffect(() => {
+    const saved = JSON.parse(localStorage.getItem(`user_addresses_${userIdentifier}`) || '[]');
+    setAddresses(saved);
+    const wBal = localStorage.getItem(`wallet_${userIdentifier}`);
+    if (wBal !== null) {
+      setWalletBalance(Number(wBal));
+    }
+    if (currentLocation && currentLocation !== '📍 Select Delivery Location') {
+      setSelectedAddress(currentLocation.replace(/📍/g, '').trim());
+    }
+  }, [isOpen, userIdentifier, currentLocation]);
+
+  const rawCart = Array.isArray(cart) && cart.length > 0 ? cart : JSON.parse(localStorage.getItem('user_cart') || '[]');
+  const totalItemCount = rawCart.reduce((acc, i) => acc + (Number(i.qty) || 1), 0);
+
+  // Check deliverability of all cart items to the selected address
+  const undeliverableItems = useMemo(() => {
+    if (rawCart.length === 0 || !selectedAddress) return [];
+    return rawCart.filter(item => !isDeliverable(selectedAddress, item));
+  }, [rawCart, selectedAddress]);
 
   if (!isOpen) return null;
 
-  const totalAmount = cart.reduce((sum, item) => sum + (item.price * item.qty), 0);
+  const subtotal = rawCart.reduce((sum, item) => sum + (Number(item?.price || 0) * Number(item?.qty || 1)), 0);
+  const gstAmount = subtotal > 0 ? Math.round(subtotal * 0.05) : 0;
+  const platformFee = subtotal > 0 ? 5 : 0;
+  const deliveryFee = subtotal > 0 ? (subtotal < 199 ? 30 : 0) : 0;
+  const grandTotal = subtotal + gstAmount + platformFee + deliveryFee;
 
-  const handleCheckout = async () => {
-    if (cart.length === 0) return;
-    setIsCheckingOut(true);
+  const handleSandboxOrder = async () => {
+    if (rawCart.length === 0 || isPlacing) return;
+
+    if (undeliverableItems.length > 0) {
+      alert(`⚠️ Location Out-of-Range!\n\n"${undeliverableItems.map(i => i.title).join(', ')}" is not delivered to "${selectedAddress}".\n\nPlease select a matching delivery hub or remove the item.`);
+      return;
+    }
+
+    if (paymentMode === 'wallet' && walletBalance < grandTotal) {
+      alert(`⚠️ Insufficient Wallet Balance (₹${walletBalance}). Please Top-Up from Account or choose UPI/Card.`);
+      return;
+    }
+
+    setIsPlacing(true);
 
     try {
-      const activeUser = JSON.parse(localStorage.getItem('active_user') || '{}');
-      const userId = activeUser._id || activeUser.id || activeUser.username || 'guest_user';
-      const customerName = activeUser.username || activeUser.name || 'Customer';
+      const sellerId = (rawCart[0] && rawCart[0].sellerId) ? rawCart[0].sellerId : 'tests';
 
-      const res = await axios.post('/api/payment/sandbox-pay', {
-        userId,
-        customerName,
-        items: cart,
-        totalAmount,
-        deliveryAddress: currentLocation,
-        paymentType: `Sandbox (${selectedMethod})`
-      });
+      const orderPayload = {
+        userId: userIdentifier,
+        customerName: user.username || user.name || 'Customer',
+        customerPhone: user.phone || '8074095895',
+        deliveryAddress: selectedAddress,
+        sellerId: sellerId,
+        items: rawCart.map(item => ({
+          foodId: item._id || item.id,
+          title: item.title || item.name,
+          price: Number(item.price),
+          qty: Number(item.qty || 1),
+          sellerId: item.sellerId || sellerId
+        })),
+        itemTotal: subtotal,
+        gst: gstAmount,
+        platformFee: platformFee,
+        deliveryFee: deliveryFee,
+        totalAmount: grandTotal,
+        paymentType: paymentMode === 'wallet' ? 'HealthyBites Wallet (Instant)' : paymentMode === 'upi' ? `Sandbox UPI (${upiId})` : 'Sandbox Card',
+        paymentStatus: 'PAID',
+        orderStatus: 'Order Placed'
+      };
 
+      const res = await axios.post('/api/payment/sandbox-pay', orderPayload);
       if (res.data?.success) {
-        setPaymentSuccess({
-          txnId: res.data.txnId || 'TXN_' + Math.floor(100000 + Math.random() * 900000),
-          method: selectedMethod
-        });
+        if (paymentMode === 'wallet') {
+          const newBal = walletBalance - grandTotal;
+          setWalletBalance(newBal);
+          localStorage.setItem(`wallet_${userIdentifier}`, String(newBal));
+
+          const existingTxns = JSON.parse(localStorage.getItem(`wallet_txns_${userIdentifier}`) || '[]');
+          const newTxn = {
+            id: 'TXN_' + Math.floor(100000 + Math.random() * 900000),
+            desc: `Food Order #${(res.data.order?._id || '').slice(-6).toUpperCase()}`,
+            amount: grandTotal,
+            type: 'DR',
+            time: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })
+          };
+          localStorage.setItem(`wallet_txns_${userIdentifier}`, JSON.stringify([newTxn, ...existingTxns]));
+        }
+
         localStorage.removeItem('user_cart');
-        setTimeout(() => {
-          window.location.reload();
-        }, 2200);
+        localStorage.removeItem('cart');
+        const shortId = (res.data.order?._id || '').slice(-6).toUpperCase();
+
+        setIsPlacing(false);
+        if (onClose) onClose();
+        alert(`🎉 Order Placed Successfully for ₹${grandTotal}!\nRef ID: #${shortId}`);
+        window.location.href = '/account';
       }
     } catch (err) {
-      console.error('Checkout error:', err);
-      alert('Payment failed. Please try again.');
-    } finally {
-      setIsCheckingOut(false);
+      console.error(err);
+      setIsPlacing(false);
+      alert(`Order error: ${err.response?.data?.message || err.message}`);
     }
   };
 
   return (
-    <div style={{
-      position: 'fixed',
-      top: 0,
-      left: 0,
-      width: '100vw',
-      height: '100vh',
-      backgroundColor: 'rgba(15, 23, 42, 0.6)',
-      backdropFilter: 'blur(4px)',
-      zIndex: 2000,
-      display: 'flex',
-      justifyContent: 'flex-end'
-    }}>
-      <div style={{
-        width: '100%',
-        maxWidth: '420px',
-        height: '100%',
-        background: '#ffffff',
-        display: 'flex',
-        flexDirection: 'column',
-        boxShadow: '-4px 0 25px rgba(0,0,0,0.15)',
-        boxSizing: 'border-box'
-      }}>
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(15, 23, 42, 0.6)', backdropFilter: 'blur(3px)', zIndex: 99999, display: 'flex', justifyContent: 'flex-end' }}>
+      <div style={{ width: '100%', maxWidth: '420px', background: '#ffffff', height: '100%', display: 'flex', flexDirection: 'column', boxShadow: '-6px 0 25px rgba(0,0,0,0.15)' }}>
+
         {/* Header */}
-        <div style={{
-          padding: '16px 20px',
-          borderBottom: '1px solid #e2e8f0',
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          background: '#f8fafc'
-        }}>
+        <div style={{ padding: '16px 20px', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: '#f8fafc' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <span style={{ fontSize: '20px' }}>🛒</span>
-            <h3 style={{ margin: 0, fontSize: '16px', fontWeight: '800', color: '#0f172a' }}>
-              Your Meal Cart ({cart.reduce((s, i) => s + i.qty, 0)})
-            </h3>
+            <span style={{ fontSize: '22px' }}>🛒</span>
+            <div>
+              <strong style={{ fontSize: '16px', color: '#0f172a', display: 'block' }}>Your Meal Cart</strong>
+              <span style={{ fontSize: '11px', color: '#64748b' }}>{totalItemCount} item(s) selected</span>
+            </div>
           </div>
-          <button
-            onClick={onClose}
-            style={{
-              background: '#e2e8f0',
-              border: 'none',
-              borderRadius: '50%',
-              width: '28px',
-              height: '28px',
-              fontWeight: 'bold',
-              color: '#475569',
-              cursor: 'pointer'
-            }}
-          >
-            ✕
-          </button>
+          <button onClick={onClose} style={{ background: '#e2e8f0', border: 'none', borderRadius: '50%', width: '28px', height: '28px', fontSize: '14px', cursor: 'pointer', color: '#475569', fontWeight: 'bold' }}>✕</button>
         </div>
 
-        {/* Content */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '16px' }}>
-          {paymentSuccess ? (
-            <div style={{ textAlign: 'center', padding: '50px 14px', color: '#16a34a' }}>
-              <span style={{ fontSize: '52px', display: 'block', marginBottom: '12px' }}>🎉</span>
-              <h4 style={{ margin: '0 0 6px 0', fontSize: '18px', fontWeight: '800' }}>Order Placed Successfully!</h4>
-              <p style={{ fontSize: '13px', color: '#64748b', margin: '0 0 8px 0' }}>Paid via Sandbox ({paymentSuccess.method})</p>
-              <span style={{ background: '#ecfdf5', color: '#16a34a', padding: '4px 12px', borderRadius: '12px', fontSize: '12px', fontWeight: 'bold' }}>
-                Ref: {paymentSuccess.txnId}
-              </span>
-            </div>
-          ) : cart.length === 0 ? (
-            <div style={{ textAlign: 'center', padding: '60px 10px', color: '#64748b' }}>
-              <span style={{ fontSize: '48px', display: 'block', marginBottom: '12px' }}>🍽️</span>
-              <h4 style={{ margin: '0 0 6px 0', color: '#0f172a' }}>Your cart is empty</h4>
-              <p style={{ fontSize: '13px', margin: 0 }}>Add fresh meals to test payment sandbox.</p>
+        {/* Body */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px' }}>
+          {rawCart.length === 0 ? (
+            <div style={{ textAlign: 'center', marginTop: '80px', color: '#64748b' }}>
+              <span style={{ fontSize: '54px', display: 'block', marginBottom: '10px' }}>🥗</span>
+              <strong style={{ fontSize: '16px', color: '#0f172a', display: 'block' }}>Your cart is empty</strong>
+              <p style={{ marginTop: '4px', fontSize: '13px' }}>Explore delicious healthy meals from menu.</p>
             </div>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-              {/* Cart Items List */}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                {cart.map(item => (
-                  <div
-                    key={item._id}
-                    style={{
-                      display: 'flex',
-                      gap: '10px',
-                      padding: '10px',
-                      border: '1px solid #e2e8f0',
-                      borderRadius: '10px',
-                      background: '#ffffff',
-                      alignItems: 'center'
-                    }}
+            <>
+              {/* Deliverability Warning */}
+              {undeliverableItems.length > 0 && (
+                <div style={{ background: '#fee2e2', border: '1px solid #ef4444', color: '#b91c1c', padding: '10px 12px', borderRadius: '8px', fontSize: '12px', fontWeight: '700', marginBottom: '12px' }}>
+                  ⚠️ {undeliverableItems.length} item(s) cannot be delivered to "{selectedAddress}". Switch location or remove them to proceed.
+                </div>
+              )}
+
+              {/* Item List */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '16px' }}>
+                {rawCart.map((item, idx) => {
+                  const itemId = item._id || item.id;
+                  const itemQty = Number(item.qty) || 1;
+                  const itemValid = isDeliverable(selectedAddress, item);
+
+                  return (
+                    <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: itemValid ? '#f8fafc' : '#fff1f2', padding: '12px 14px', borderRadius: '12px', border: itemValid ? '1px solid #e2e8f0' : '1px solid #fca5a5' }}>
+                      <div>
+                        <strong style={{ fontSize: '14px', color: '#0f172a', display: 'block' }}>{item.title || item.name}</strong>
+                        <span style={{ fontSize: '12px', color: '#16a34a', fontWeight: '700' }}>₹{item.price} each</span>
+                        {!itemValid && (
+                          <span style={{ display: 'block', fontSize: '10px', color: '#dc2626', fontWeight: '800', marginTop: '2px' }}>
+                            🔴 Out of Delivery Range ({item.city || 'Kitchen'} area)
+                          </span>
+                        )}
+                      </div>
+
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', background: '#fff', border: '1px solid #cbd5e1', borderRadius: '8px', padding: '2px 6px' }}>
+                        <button
+                          type="button"
+                          onClick={() => updateQuantity && updateQuantity(itemId, -1)}
+                          style={{ background: 'none', border: 'none', padding: '3px 8px', fontWeight: '800', cursor: 'pointer', color: '#dc2626' }}
+                        >
+                          -
+                        </button>
+                        <span style={{ fontSize: '13px', fontWeight: '800', color: '#0f172a' }}>{itemQty}</span>
+                        <button
+                          type="button"
+                          onClick={() => updateQuantity && updateQuantity(itemId, 1)}
+                          style={{ background: 'none', border: 'none', padding: '3px 8px', fontWeight: '800', cursor: 'pointer', color: '#16a34a' }}
+                        >
+                          +
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Delivery Address Selector */}
+              <div style={{ marginBottom: '16px', background: '#f8fafc', padding: '12px', borderRadius: '10px', border: '1px solid #e2e8f0' }}>
+                <span style={{ fontSize: '12px', fontWeight: '700', color: '#0f172a', display: 'block', marginBottom: '6px' }}>
+                  📍 Delivery Location:
+                </span>
+                {addresses.length > 0 ? (
+                  <select
+                    value={selectedAddress}
+                    onChange={e => setSelectedAddress(e.target.value)}
+                    style={{ width: '100%', padding: '8px 10px', fontSize: '12px', borderRadius: '6px', border: '1px solid #cbd5e1', background: '#fff', color: '#334155' }}
                   >
-                    <img
-                      src={item.imageUrl || 'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=500'}
-                      alt={item.title}
-                      style={{ width: '50px', height: '50px', objectFit: 'cover', borderRadius: '6px' }}
-                    />
-                    <div style={{ flex: 1 }}>
-                      <h5 style={{ margin: '0 0 2px 0', fontSize: '13px', color: '#0f172a', fontWeight: '700' }}>
-                        {item.title}
-                      </h5>
-                      <span style={{ fontSize: '13px', fontWeight: '800', color: '#16a34a' }}>
-                        ₹{item.price}
-                      </span>
-                    </div>
-                    <div style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      background: '#ecfdf5',
-                      border: '1px solid #86efac',
-                      borderRadius: '6px'
-                    }}>
-                      <button
-                        onClick={() => updateQuantity(item._id, -1)}
-                        style={{ background: 'transparent', border: 'none', padding: '2px 8px', color: '#15803d', fontWeight: 'bold', cursor: 'pointer' }}
-                      >
-                        -
-                      </button>
-                      <span style={{ padding: '0 4px', fontWeight: '700', color: '#15803d', fontSize: '12px' }}>
-                        {item.qty}
-                      </span>
-                      <button
-                        onClick={() => updateQuantity(item._id, 1)}
-                        style={{ background: 'transparent', border: 'none', padding: '2px 8px', color: '#15803d', fontWeight: 'bold', cursor: 'pointer' }}
-                      >
-                        +
-                      </button>
-                    </div>
-                  </div>
-                ))}
+                    {addresses.map(a => (
+                      <option key={a.id} value={a.address}>
+                        [{a.type}] {a.address}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <textarea
+                    value={selectedAddress}
+                    onChange={e => setSelectedAddress(e.target.value)}
+                    style={{ width: '100%', fontSize: '12px', padding: '8px', borderRadius: '6px', border: '1px solid #cbd5e1', boxSizing: 'border-box' }}
+                    rows="2"
+                  />
+                )}
               </div>
 
-              {/* Delivery Hub Badge */}
-              <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '10px 12px' }}>
-                <span style={{ fontSize: '11px', color: '#64748b', display: 'block', fontWeight: 'bold' }}>Delivering to:</span>
-                <span style={{ fontSize: '12px', color: '#0f172a', fontWeight: '600' }}>{currentLocation}</span>
-              </div>
-
-              {/* Sandbox Payment Options */}
-              <div style={{ border: '1px solid #e2e8f0', borderRadius: '12px', padding: '14px', background: '#ffffff' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-                  <strong style={{ fontSize: '13px', color: '#0f172a' }}>💳 Select Sandbox Payment</strong>
-                  <span style={{ background: '#fef3c7', color: '#b45309', padding: '2px 8px', borderRadius: '6px', fontSize: '10px', fontWeight: '800' }}>
-                    TEST MODE
+              {/* Bill Details */}
+              <div style={{ background: '#f1f5f9', padding: '12px 14px', borderRadius: '12px', marginBottom: '16px', fontSize: '12px', color: '#334155' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                  <span>Item Subtotal:</span>
+                  <span style={{ fontWeight: '700' }}>₹{subtotal}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                  <span>GST (5% Restaurant Tax):</span>
+                  <span style={{ fontWeight: '700' }}>₹{gstAmount}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                  <span>Platform Fee:</span>
+                  <span style={{ fontWeight: '700' }}>₹{platformFee}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
+                  <span>Delivery Partner Fee:</span>
+                  <span style={{ color: deliveryFee === 0 ? '#16a34a' : '#0f172a', fontWeight: '700' }}>
+                    {deliveryFee === 0 ? 'FREE' : `₹${deliveryFee}`}
                   </span>
                 </div>
-
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '12px' }}>
-                  {/* Option 1: UPI */}
-                  <label style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '10px',
-                    padding: '8px 12px',
-                    borderRadius: '8px',
-                    border: selectedMethod === 'UPI' ? '2px solid #16a34a' : '1px solid #e2e8f0',
-                    background: selectedMethod === 'UPI' ? '#ecfdf5' : '#ffffff',
-                    cursor: 'pointer',
-                    fontSize: '13px',
-                    fontWeight: '600'
-                  }}>
-                    <input
-                      type="radio"
-                      name="payment_method"
-                      checked={selectedMethod === 'UPI'}
-                      onChange={() => setSelectedMethod('UPI')}
-                    />
-                    <span>⚡ Instant UPI (GPay / PhonePe / Paytm)</span>
-                  </label>
-
-                  {/* Option 2: Card */}
-                  <label style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '10px',
-                    padding: '8px 12px',
-                    borderRadius: '8px',
-                    border: selectedMethod === 'CARD' ? '2px solid #16a34a' : '1px solid #e2e8f0',
-                    background: selectedMethod === 'CARD' ? '#ecfdf5' : '#ffffff',
-                    cursor: 'pointer',
-                    fontSize: '13px',
-                    fontWeight: '600'
-                  }}>
-                    <input
-                      type="radio"
-                      name="payment_method"
-                      checked={selectedMethod === 'CARD'}
-                      onChange={() => setSelectedMethod('CARD')}
-                    />
-                    <span>💳 Test Debit / Credit Card</span>
-                  </label>
-
-                  {/* Option 3: COD */}
-                  <label style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '10px',
-                    padding: '8px 12px',
-                    borderRadius: '8px',
-                    border: selectedMethod === 'COD' ? '2px solid #16a34a' : '1px solid #e2e8f0',
-                    background: selectedMethod === 'COD' ? '#ecfdf5' : '#ffffff',
-                    cursor: 'pointer',
-                    fontSize: '13px',
-                    fontWeight: '600'
-                  }}>
-                    <input
-                      type="radio"
-                      name="payment_method"
-                      checked={selectedMethod === 'COD'}
-                      onChange={() => setSelectedMethod('COD')}
-                    />
-                    <span>💵 Cash on Delivery (Pay on Arrival)</span>
-                  </label>
+                <div style={{ borderTop: '1px dashed #94a3b8', paddingTop: '6px', display: 'flex', justifyContent: 'space-between', fontSize: '14px', fontWeight: '800', color: '#0f172a' }}>
+                  <span>To Pay:</span>
+                  <span style={{ color: '#16a34a' }}>₹{grandTotal}</span>
                 </div>
-
-                {/* Sub-inputs based on method */}
-                {selectedMethod === 'UPI' && (
-                  <div>
-                    <label style={{ display: 'block', fontSize: '11px', color: '#64748b', fontWeight: 'bold', marginBottom: '4px' }}>Sandbox UPI ID</label>
-                    <input
-                      type="text"
-                      value={upiId}
-                      onChange={e => setUpiId(e.target.value)}
-                      style={{ width: '100%', padding: '8px 10px', border: '1px solid #cbd5e1', borderRadius: '6px', fontSize: '12px', boxSizing: 'border-box' }}
-                    />
-                  </div>
-                )}
-
-                {selectedMethod === 'CARD' && (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                    <input
-                      type="text"
-                      value={cardNumber}
-                      onChange={e => setCardNumber(e.target.value)}
-                      placeholder="Card Number"
-                      style={{ width: '100%', padding: '8px 10px', border: '1px solid #cbd5e1', borderRadius: '6px', fontSize: '12px', boxSizing: 'border-box' }}
-                    />
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
-                      <input
-                        type="text"
-                        value={cardExpiry}
-                        onChange={e => setCardExpiry(e.target.value)}
-                        placeholder="MM/YY"
-                        style={{ padding: '8px 10px', border: '1px solid #cbd5e1', borderRadius: '6px', fontSize: '12px' }}
-                      />
-                      <input
-                        type="text"
-                        value={cardCvv}
-                        onChange={e => setCardCvv(e.target.value)}
-                        placeholder="CVV"
-                        style={{ padding: '8px 10px', border: '1px solid #cbd5e1', borderRadius: '6px', fontSize: '12px' }}
-                      />
-                    </div>
-                  </div>
-                )}
               </div>
-            </div>
+
+              {/* Payment Mode */}
+              <div style={{ marginBottom: '16px' }}>
+                <strong style={{ fontSize: '13px', color: '#0f172a', display: 'block', marginBottom: '6px' }}>
+                  💳 Select Payment <span style={{ color: '#ea580c', fontSize: '10px' }}>(SANDBOX)</span>
+                </strong>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  {[
+                    { id: 'wallet', label: `💰 HealthyBites Wallet (Bal: ₹${walletBalance})` },
+                    { id: 'upi', label: '⚡ Instant UPI (GPay / PhonePe / Paytm)' },
+                    { id: 'card', label: '💳 Test Debit / Credit Card' }
+                  ].map(m => (
+                    <label key={m.id} style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', background: paymentMode === m.id ? '#ecfdf5' : '#fff', border: paymentMode === m.id ? '1px solid #16a34a' : '1px solid #cbd5e1', padding: '8px 10px', borderRadius: '8px', cursor: 'pointer' }}>
+                      <input type="radio" name="pay_mode" checked={paymentMode === m.id} onChange={() => setPaymentMode(m.id)} />
+                      <span style={{ fontWeight: paymentMode === m.id ? '700' : '500' }}>{m.label}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              {paymentMode === 'upi' && (
+                <div style={{ marginBottom: '16px' }}>
+                  <label style={{ fontSize: '11px', fontWeight: '700', color: '#64748b', display: 'block', marginBottom: '3px' }}>Sandbox UPI ID</label>
+                  <input
+                    type="text"
+                    value={upiId}
+                    onChange={(e) => setUpiId(e.target.value)}
+                    style={{ width: '100%', padding: '8px 10px', fontSize: '12px', borderRadius: '6px', border: '1px solid #cbd5e1', boxSizing: 'border-box' }}
+                  />
+                </div>
+              )}
+            </>
           )}
         </div>
 
         {/* Footer */}
-        {cart.length > 0 && !paymentSuccess && (
-          <div style={{ padding: '16px', borderTop: '1px solid #e2e8f0', background: '#f8fafc' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '12px' }}>
-              <span style={{ fontSize: '14px', fontWeight: '600', color: '#64748b' }}>To Pay</span>
-              <span style={{ fontSize: '18px', fontWeight: '800', color: '#0f172a' }}>₹{totalAmount}</span>
+        {rawCart.length > 0 && (
+          <div style={{ padding: '16px 20px', borderTop: '1px solid #e2e8f0', background: '#f8fafc' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+              <span style={{ fontSize: '12px', color: '#64748b' }}>Final Total:</span>
+              <strong style={{ fontSize: '20px', color: '#16a34a' }}>₹{grandTotal}</strong>
             </div>
             <button
-              onClick={handleCheckout}
-              disabled={isCheckingOut}
+              onClick={handleSandboxOrder}
+              disabled={isPlacing || undeliverableItems.length > 0}
               style={{
                 width: '100%',
-                background: '#16a34a',
-                color: '#ffffff',
+                background: (isPlacing || undeliverableItems.length > 0) ? '#94a3b8' : '#16a34a',
+                color: '#fff',
                 border: 'none',
                 padding: '12px',
-                borderRadius: '8px',
+                borderRadius: '10px',
                 fontWeight: '800',
                 fontSize: '14px',
-                cursor: 'pointer'
+                cursor: (isPlacing || undeliverableItems.length > 0) ? 'not-allowed' : 'pointer'
               }}
             >
-              {isCheckingOut ? 'Simulating Sandbox Payment...' : `Pay ₹${totalAmount} via Sandbox ${selectedMethod}`}
+              {undeliverableItems.length > 0 ? '⚠️ Remove Out-of-Range Items' : isPlacing ? 'Processing Order...' : `Pay ₹${grandTotal} via ${paymentMode === 'wallet' ? 'Wallet' : paymentMode === 'upi' ? 'UPI' : 'Card'}`}
             </button>
           </div>
         )}
+
       </div>
     </div>
   );

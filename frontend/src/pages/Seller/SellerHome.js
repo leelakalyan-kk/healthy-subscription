@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useContext, useCallback, useMemo } from 'react';
+import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import io from 'socket.io-client';
 import { AuthContext } from '../../context/AuthContext';
@@ -7,24 +8,37 @@ const socket = io(window.location.origin, {
   transports: ['websocket', 'polling']
 });
 
-const KitchenDashboard = () => {
+const COMMISSION_RATE = 0.10;
+
+const SellerHome = () => {
+  const navigate = useNavigate();
   const { currentUser, logout } = useContext(AuthContext);
-  const [activeTab, setActiveTab] = useState('orders'); // 'orders' | 'menu' | 'withdraw'
+  const activeUser = currentUser || JSON.parse(localStorage.getItem('active_user') || 'null');
+
+  useEffect(() => {
+    if (!activeUser || (activeUser.role && activeUser.role !== 'seller' && activeUser.role !== 'admin')) {
+      navigate('/login');
+    }
+  }, [activeUser, navigate]);
+
+  const [activeTab, setActiveTab] = useState('orders');
   const [orderFilter, setOrderFilter] = useState('ALL');
 
-  const activeUser = currentUser || JSON.parse(localStorage.getItem('active_user') || '{}');
-  const sellerIdentifier = activeUser._id || activeUser.id || activeUser.username || 'tests';
+  const sellerDisplayName = activeUser?.username || activeUser?.name || 'Kitchen Partner';
+  const sellerIdentifier = activeUser?._id || activeUser?.id || activeUser?.username || 'seller_1';
 
   const [isKitchenOnline, setIsKitchenOnline] = useState(() => {
-    return localStorage.getItem(`kitchen_online_${sellerIdentifier}`) !== 'false';
+    const saved = localStorage.getItem(`kitchen_online_${sellerIdentifier}`);
+    return saved === null ? true : saved === 'true';
   });
 
   const [orders, setOrders] = useState([]);
   const [foods, setFoods] = useState([]);
   const [withdrawals, setWithdrawals] = useState([]);
   const [withdrawAmount, setWithdrawAmount] = useState('');
-  const [payoutUpi, setPayoutUpi] = useState('kalyan@okhdfcbank');
+  const [payoutUpi, setPayoutUpi] = useState(activeUser?.email ? `${sellerDisplayName}@upi` : 'seller@upi');
   const [isSubmittingWithdraw, setIsSubmittingWithdraw] = useState(false);
+  const [isTogglingKitchen, setIsTogglingKitchen] = useState(false);
 
   const [showAddDish, setShowAddDish] = useState(false);
   const [updatingId, setUpdatingId] = useState(null);
@@ -37,18 +51,24 @@ const KitchenDashboard = () => {
     price: '',
     protein: 'High Protein',
     imageUrl: '',
+    sellerName: sellerDisplayName,
+    branchName: 'Main Outlet',
     areaName: '',
     city: '',
     pincode: '',
     isAvailable: true
   });
 
+  useEffect(() => {
+    if (sellerDisplayName) {
+      setDish(prev => ({ ...prev, sellerName: sellerDisplayName }));
+    }
+  }, [sellerDisplayName]);
+
   const fetchOrders = useCallback(async () => {
     try {
       const res = await axios.get(`/api/orders/seller-orders/${sellerIdentifier}`);
-      if (Array.isArray(res.data)) {
-        setOrders(res.data);
-      }
+      if (Array.isArray(res.data)) setOrders(res.data);
     } catch (err) {
       console.error('Error fetching seller orders:', err);
     }
@@ -68,15 +88,14 @@ const KitchenDashboard = () => {
   const fetchWithdrawals = useCallback(async () => {
     try {
       const res = await axios.get(`/api/withdraw/history/${sellerIdentifier}`);
-      if (Array.isArray(res.data)) {
-        setWithdrawals(res.data);
-      }
+      if (Array.isArray(res.data)) setWithdrawals(res.data);
     } catch (err) {
       console.error('Error fetching withdrawals:', err);
     }
   }, [sellerIdentifier]);
 
   useEffect(() => {
+    if (!activeUser) return;
     fetchOrders();
     fetchFoods();
     fetchWithdrawals();
@@ -92,9 +111,7 @@ const KitchenDashboard = () => {
     });
 
     socket.on('order_status_updated', (updatedOrder) => {
-      setOrders((prev) =>
-        prev.map((o) => (o._id === updatedOrder._id ? updatedOrder : o))
-      );
+      setOrders((prev) => prev.map((o) => (o._id === updatedOrder._id ? updatedOrder : o)));
     });
 
     socket.on('food_added', (newDish) => {
@@ -103,6 +120,14 @@ const KitchenDashboard = () => {
 
     socket.on('food_updated', (updatedDish) => {
       setFoods((prev) => prev.map((f) => (f._id === updatedDish._id ? updatedDish : f)));
+    });
+
+    socket.on('foods_bulk_updated', (allFoods) => {
+      if (Array.isArray(allFoods)) setFoods(allFoods);
+    });
+
+    socket.on('food_deleted', (deletedId) => {
+      setFoods((prev) => prev.filter((f) => f._id !== deletedId));
     });
 
     socket.on('withdrawal_requested', (w) => {
@@ -115,14 +140,36 @@ const KitchenDashboard = () => {
       socket.off('order_status_updated');
       socket.off('food_added');
       socket.off('food_updated');
+      socket.off('foods_bulk_updated');
+      socket.off('food_deleted');
       socket.off('withdrawal_requested');
     };
-  }, [fetchOrders, fetchFoods, fetchWithdrawals]);
+  }, [activeUser, fetchOrders, fetchFoods, fetchWithdrawals]);
 
-  const toggleKitchenOnline = () => {
+  if (!activeUser) return null;
+
+  const handleLogout = () => {
+    if (logout) logout();
+    localStorage.removeItem('active_user');
+    localStorage.removeItem('token');
+    navigate('/login');
+  };
+
+  const toggleKitchenOnline = async () => {
     const nextState = !isKitchenOnline;
-    setIsKitchenOnline(nextState);
-    localStorage.setItem(`kitchen_online_${sellerIdentifier}`, nextState ? 'true' : 'false');
+    setIsTogglingKitchen(true);
+
+    try {
+      await axios.put(`/api/food/toggle-kitchen/${sellerIdentifier}`, { isOnline: nextState });
+      setIsKitchenOnline(nextState);
+      localStorage.setItem(`kitchen_online_${sellerIdentifier}`, nextState ? 'true' : 'false');
+      alert(nextState ? '🟢 Kitchen is now OPEN! Dishes are available for orders.' : '⏸️ Kitchen is PAUSED. Customers cannot place orders.');
+      fetchFoods();
+    } catch (err) {
+      alert('Failed to toggle kitchen status: ' + err.message);
+    } finally {
+      setIsTogglingKitchen(false);
+    }
   };
 
   const handleUpdateStatus = async (orderId, newStatus) => {
@@ -130,12 +177,9 @@ const KitchenDashboard = () => {
     try {
       const res = await axios.put(`/api/orders/status/${orderId}`, { status: newStatus });
       if (res.data?.success) {
-        setOrders((prev) =>
-          prev.map((o) => (o._id === orderId ? { ...o, orderStatus: newStatus } : o))
-        );
+        setOrders((prev) => prev.map((o) => (o._id === orderId ? { ...o, orderStatus: newStatus } : o)));
       }
     } catch (err) {
-      console.error('Error updating status:', err);
       alert('Failed to update status');
     } finally {
       setUpdatingId(null);
@@ -157,33 +201,47 @@ const KitchenDashboard = () => {
       if (res.data?.success) {
         setWithdrawals(prev => [res.data.withdrawal, ...prev]);
         setWithdrawAmount('');
-        alert('✅ Withdrawal request submitted! Reference: ' + res.data.withdrawal.referenceId);
+        alert('✅ ₹' + res.data.withdrawal.amount + ' withdrawn successfully to ' + payoutUpi);
       }
     } catch (err) {
-      alert('Withdrawal request failed: ' + (err.response?.data?.message || err.message));
+      alert('Withdrawal failed: ' + (err.response?.data?.message || err.message));
     } finally {
       setIsSubmittingWithdraw(false);
     }
   };
 
   const stats = useMemo(() => {
-    const totalRevenue = orders
-      .filter(o => o.orderStatus !== 'Cancelled')
-      .reduce((sum, o) => sum + (Number(o.totalAmount) || 0), 0);
+    const validOrders = orders.filter(o => o.orderStatus !== 'Cancelled');
 
-    const totalWithdrawn = withdrawals
+    let totalGrossSales = 0;
+    let totalCommissionDeducted = 0;
+    let totalNetEarned = 0;
+
+    validOrders.forEach(o => {
+      const itemsSubtotal = (o.items || []).reduce((sum, item) => sum + (Number(item.price || 0) * Number(item.qty || 1)), 0);
+      const foodRevenue = itemsSubtotal > 0 ? itemsSubtotal : Number(o.itemTotal || o.totalAmount || 0);
+      const commission = Math.round(foodRevenue * COMMISSION_RATE);
+      const net = foodRevenue - commission;
+
+      totalGrossSales += foodRevenue;
+      totalCommissionDeducted += commission;
+      totalNetEarned += net;
+    });
+
+    const totalWithdrawnAmount = withdrawals
+      .filter(w => w.status !== 'Failed' && w.status !== 'Cancelled')
       .reduce((sum, w) => sum + (Number(w.amount) || 0), 0);
 
-    const availableBalance = Math.max(0, totalRevenue - totalWithdrawn);
+    const availableBalance = Math.max(0, totalNetEarned - totalWithdrawnAmount);
     const activeCount = orders.filter(o => ['Order Placed', 'Preparing', 'Ready for Pickup'].includes(o.orderStatus || 'Order Placed')).length;
-    const completedCount = orders.filter(o => ['Delivered', 'Completed'].includes(o.orderStatus)).length;
 
     return {
-      revenue: totalRevenue,
-      withdrawn: totalWithdrawn,
+      grossSales: totalGrossSales,
+      commissionPaid: totalCommissionDeducted,
+      netEarned: totalNetEarned,
+      totalWithdrawn: totalWithdrawnAmount,
       available: availableBalance,
       active: activeCount,
-      completed: completedCount,
       totalDishes: foods.length
     };
   }, [orders, foods, withdrawals]);
@@ -214,19 +272,22 @@ const KitchenDashboard = () => {
     e.preventDefault();
     if (!dish.title.trim()) return alert('Please enter dish title');
     if (!dish.price) return alert('Please enter price');
+    if (!dish.areaName.trim()) return alert('Please enter Area / Locality');
+    if (!dish.city.trim()) return alert('Please enter City');
 
     try {
       const res = await axios.post('/api/food/add', {
-        title: dish.title,
-        description: dish.description,
+        title: dish.title.trim(),
+        description: dish.description.trim(),
         price: Number(dish.price),
         protein: dish.protein,
         imageUrl: dish.imageUrl,
-        areaName: dish.areaName || 'Local Hub',
-        city: dish.city || 'Vijayawada',
-        pincode: dish.pincode || '520001',
         sellerId: sellerIdentifier,
-        sellerName: activeUser.username || 'tests'
+        sellerName: dish.sellerName || sellerDisplayName,
+        branchName: dish.branchName || 'Main Kitchen',
+        areaName: dish.areaName.trim(),
+        city: dish.city.trim(),
+        pincode: dish.pincode.trim()
       });
 
       if (res.data?.success) {
@@ -238,6 +299,8 @@ const KitchenDashboard = () => {
           price: '',
           protein: 'High Protein',
           imageUrl: '',
+          sellerName: sellerDisplayName,
+          branchName: 'Main Kitchen',
           areaName: '',
           city: '',
           pincode: '',
@@ -332,36 +395,37 @@ const KitchenDashboard = () => {
               borderRadius: '12px',
               fontWeight: '800'
             }}>
-              {isKitchenOnline ? '🟢 KITCHEN OPEN' : '🔴 OFFLINE'}
+              {isKitchenOnline ? '🟢 KITCHEN ONLINE' : '🔴 OFFLINE'}
             </span>
           </div>
           <h2 style={{ margin: '8px 0 2px 0', fontSize: '22px', fontWeight: '800' }}>
-            👨‍🍳 {activeUser.username || 'tests'} Operations Desk
+            👨‍🍳 {sellerDisplayName} Operations Desk
           </h2>
           <span style={{ fontSize: '12px', color: '#94a3b8' }}>
-            Live Kitchen Operations, Real-Time Orders & Payout Desk
+            Live Kitchen Orders • 10% Flat Platform Commission Model
           </span>
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
           <button
             onClick={toggleKitchenOnline}
+            disabled={isTogglingKitchen}
             style={{
-              background: isKitchenOnline ? '#15803d' : '#334155',
+              background: isKitchenOnline ? '#15803d' : '#b91c1c',
               color: '#ffffff',
-              border: '1px solid rgba(255,255,255,0.2)',
+              border: isKitchenOnline ? '1px solid #86efac' : '1px solid #f87171',
               padding: '8px 16px',
               borderRadius: '24px',
               fontWeight: '800',
               fontSize: '12px',
-              cursor: 'pointer'
+              cursor: isTogglingKitchen ? 'not-allowed' : 'pointer'
             }}
           >
-            {isKitchenOnline ? '⚡ Kitchen Online' : '⏸️ Paused'}
+            {isTogglingKitchen ? 'Updating...' : isKitchenOnline ? '⚡ Kitchen Online (Click to Pause)' : '⏸️ Kitchen Paused (Click to Open)'}
           </button>
 
           <button
-            onClick={logout}
+            onClick={handleLogout}
             style={{
               background: 'rgba(239, 68, 68, 0.2)',
               color: '#f87171',
@@ -378,30 +442,32 @@ const KitchenDashboard = () => {
         </div>
       </div>
 
-      {/* Metrics Row */}
+      {/* Persistent Accounting Cards */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '14px', marginBottom: '22px' }}>
         <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', padding: '16px 18px', borderRadius: '14px' }}>
-          <span style={{ fontSize: '12px', color: '#64748b', fontWeight: '700' }}>💰 TOTAL REVENUE</span>
-          <div style={{ fontSize: '22px', fontWeight: '800', color: '#0f172a', marginTop: '4px' }}>₹{stats.revenue}</div>
-          <span style={{ fontSize: '11px', color: '#94a3b8' }}>Gross lifetime sales</span>
+          <span style={{ fontSize: '12px', color: '#64748b', fontWeight: '700' }}>💰 TOTAL GROSS SALES</span>
+          <div style={{ fontSize: '22px', fontWeight: '800', color: '#0f172a', marginTop: '4px' }}>₹{stats.grossSales}</div>
+          <span style={{ fontSize: '11px', color: '#94a3b8' }}>Lifetime volume</span>
         </div>
 
-        <div style={{ background: '#ecfdf5', border: '2px solid #86efac', padding: '16px 18px', borderRadius: '14px' }}>
-          <span style={{ fontSize: '12px', color: '#15803d', fontWeight: '700' }}>⚡ WITHDRAWABLE BALANCE</span>
-          <div style={{ fontSize: '22px', fontWeight: '800', color: '#16a34a', marginTop: '4px' }}>₹{stats.available}</div>
-          <span style={{ fontSize: '11px', color: '#15803d' }}>Ready for Instant Payout</span>
+        <div style={{ background: '#ffffff', border: '1px solid #fed7aa', padding: '16px 18px', borderRadius: '14px' }}>
+          <span style={{ fontSize: '12px', color: '#c2410c', fontWeight: '700' }}>📉 PLATFORM FEE (10%)</span>
+          <div style={{ fontSize: '22px', fontWeight: '800', color: '#ea580c', marginTop: '4px' }}>- ₹{stats.commissionPaid}</div>
+          <span style={{ fontSize: '11px', color: '#9a3412' }}>Service deduction</span>
         </div>
 
-        <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', padding: '16px 18px', borderRadius: '14px' }}>
-          <span style={{ fontSize: '12px', color: '#64748b', fontWeight: '700' }}>⚡ ACTIVE ORDERS</span>
-          <div style={{ fontSize: '22px', fontWeight: '800', color: '#0284c7', marginTop: '4px' }}>{stats.active}</div>
-          <span style={{ fontSize: '11px', color: '#94a3b8' }}>Live in-kitchen orders</span>
+        <div style={{ background: '#f8fafc', border: '1px solid #cbd5e1', padding: '16px 18px', borderRadius: '14px' }}>
+          <span style={{ fontSize: '12px', color: '#475569', fontWeight: '700' }}>💸 TOTAL PAID OUT</span>
+          <div style={{ fontSize: '22px', fontWeight: '800', color: '#334155', marginTop: '4px' }}>₹{stats.totalWithdrawn}</div>
+          <span style={{ fontSize: '11px', color: '#64748b' }}>Settled to bank/UPI</span>
         </div>
 
-        <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', padding: '16px 18px', borderRadius: '14px' }}>
-          <span style={{ fontSize: '12px', color: '#64748b', fontWeight: '700' }}>🍽️ LIVE DISHES</span>
-          <div style={{ fontSize: '22px', fontWeight: '800', color: '#8b5cf6', marginTop: '4px' }}>{stats.totalDishes}</div>
-          <span style={{ fontSize: '11px', color: '#94a3b8' }}>Live catalogue items</span>
+        <div style={{ background: stats.available > 0 ? '#ecfdf5' : '#f8fafc', border: stats.available > 0 ? '2px solid #86efac' : '1px solid #e2e8f0', padding: '16px 18px', borderRadius: '14px' }}>
+          <span style={{ fontSize: '12px', color: stats.available > 0 ? '#15803d' : '#64748b', fontWeight: '700' }}>⚡ AVAILABLE BALANCE</span>
+          <div style={{ fontSize: '22px', fontWeight: '800', color: stats.available > 0 ? '#16a34a' : '#64748b', marginTop: '4px' }}>₹{stats.available}</div>
+          <span style={{ fontSize: '11px', color: stats.available > 0 ? '#15803d' : '#94a3b8' }}>
+            {stats.available === 0 ? '✓ All Settled' : 'Ready to Withdraw'}
+          </span>
         </div>
       </div>
 
@@ -514,6 +580,11 @@ const KitchenDashboard = () => {
             ) : (
               filteredOrders.map((o) => {
                 const badge = getBadgeColors(o.orderStatus);
+                const itemsSubtotal = (o.items || []).reduce((sum, item) => sum + (Number(item.price || 0) * Number(item.qty || 1)), 0);
+                const foodGross = itemsSubtotal > 0 ? itemsSubtotal : Number(o.itemTotal || o.totalAmount || 0);
+                const commission = Math.round(foodGross * COMMISSION_RATE);
+                const sellerNetPayout = foodGross - commission;
+
                 return (
                   <div
                     key={o._id}
@@ -527,14 +598,17 @@ const KitchenDashboard = () => {
                   >
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #f1f5f9', paddingBottom: '10px', marginBottom: '10px' }}>
                       <div>
-                        <strong style={{ fontSize: '16px', color: '#0f172a' }}>Order #{o._id.slice(-6).toUpperCase()}</strong>
+                        <strong style={{ fontSize: '16px', color: '#0f172a' }}>Order #{(o._id || '').slice(-6).toUpperCase()}</strong>
                         <span style={{ display: 'block', fontSize: '12px', color: '#64748b' }}>
-                          Customer: <strong style={{ color: '#0f172a' }}>{o.customerName || 'kalyan'}</strong>
+                          Customer: <strong style={{ color: '#0f172a' }}>{o.customerName || 'Customer'}</strong>
                         </span>
                       </div>
                       <div style={{ textAlign: 'right' }}>
-                        <span style={{ fontSize: '18px', fontWeight: '800', color: '#16a34a' }}>₹{o.totalAmount}</span>
-                        <span style={{ display: 'block', fontSize: '11px', background: badge.bg, color: badge.text, border: `1px solid ${badge.border}`, padding: '2px 8px', borderRadius: '10px', fontWeight: '700', marginTop: '2px' }}>
+                        <span style={{ fontSize: '18px', fontWeight: '800', color: '#16a34a' }}>₹{sellerNetPayout}</span>
+                        <span style={{ display: 'block', fontSize: '10px', color: '#64748b' }}>
+                          (Gross: ₹{foodGross} - 10% Comm: ₹{commission})
+                        </span>
+                        <span style={{ display: 'inline-block', fontSize: '11px', background: badge.bg, color: badge.text, border: `1px solid ${badge.border}`, padding: '2px 8px', borderRadius: '10px', fontWeight: '700', marginTop: '2px' }}>
                           ● {o.orderStatus || 'Order Placed'}
                         </span>
                       </div>
@@ -550,7 +624,7 @@ const KitchenDashboard = () => {
                     </div>
 
                     <div style={{ background: '#f8fafc', padding: '8px 10px', borderRadius: '8px', fontSize: '12px', color: '#475569', marginBottom: '12px' }}>
-                      <strong>📍 Address:</strong> {o.deliveryAddress || 'Saved Customer Location'}
+                      <strong>📍 Delivery Address:</strong> {o.deliveryAddress || 'Saved Customer Location'}
                     </div>
 
                     <div style={{ borderTop: '2px solid #f1f5f9', paddingTop: '12px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
@@ -619,12 +693,35 @@ const KitchenDashboard = () => {
                 </div>
               </div>
 
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px', marginBottom: '12px' }}>
+                <div>
+                  <label style={{ display: 'block', fontSize: '11px', fontWeight: '700', color: '#475569', marginBottom: '4px' }}>Brand / Kitchen Name *</label>
+                  <input
+                    type="text"
+                    value={dish.sellerName}
+                    onChange={(e) => setDish({ ...dish, sellerName: e.target.value })}
+                    style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #cbd5e1', fontSize: '13px', boxSizing: 'border-box' }}
+                    required
+                  />
+                </div>
+                <div>
+                  <label style={{ display: 'block', fontSize: '11px', fontWeight: '700', color: '#475569', marginBottom: '4px' }}>Branch / Outlet Name *</label>
+                  <input
+                    type="text"
+                    value={dish.branchName}
+                    onChange={(e) => setDish({ ...dish, branchName: e.target.value })}
+                    style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #cbd5e1', fontSize: '13px', boxSizing: 'border-box' }}
+                    required
+                  />
+                </div>
+              </div>
+
               <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '12px', marginBottom: '12px' }}>
                 <div>
                   <label style={{ display: 'block', fontSize: '11px', fontWeight: '700', color: '#475569', marginBottom: '4px' }}>Dish Name *</label>
                   <input
                     type="text"
-                    placeholder="Enter dish name"
+                    placeholder="e.g. Quinoa Veggie Bowl"
                     value={dish.title}
                     onChange={(e) => setDish({ ...dish, title: e.target.value })}
                     style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #cbd5e1', fontSize: '13px', boxSizing: 'border-box' }}
@@ -635,7 +732,7 @@ const KitchenDashboard = () => {
                   <label style={{ display: 'block', fontSize: '11px', fontWeight: '700', color: '#475569', marginBottom: '4px' }}>Price (₹) *</label>
                   <input
                     type="number"
-                    placeholder="Enter price"
+                    placeholder="₹ 180"
                     value={dish.price}
                     onChange={(e) => setDish({ ...dish, price: e.target.value })}
                     style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #cbd5e1', fontSize: '13px', boxSizing: 'border-box' }}
@@ -647,12 +744,54 @@ const KitchenDashboard = () => {
               <div style={{ marginBottom: '12px' }}>
                 <label style={{ display: 'block', fontSize: '11px', fontWeight: '700', color: '#475569', marginBottom: '4px' }}>Description *</label>
                 <textarea
-                  placeholder="Enter ingredients & nutritional details"
+                  placeholder="Ingredients and nutritional info"
                   value={dish.description}
                   onChange={(e) => setDish({ ...dish, description: e.target.value })}
                   style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #cbd5e1', fontSize: '12px', boxSizing: 'border-box', minHeight: '60px' }}
                   required
                 />
+              </div>
+
+              <div style={{ background: '#f8fafc', padding: '14px', borderRadius: '10px', border: '1px solid #cbd5e1', marginBottom: '14px' }}>
+                <span style={{ fontSize: '12px', fontWeight: '800', color: '#0f172a', display: 'block', marginBottom: '8px' }}>
+                  📍 Kitchen Location Details:
+                </span>
+                
+                <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr 1fr', gap: '10px' }}>
+                  <div>
+                    <label style={{ fontSize: '11px', color: '#475569', fontWeight: '700', display: 'block', marginBottom: '2px' }}>Area / Locality *</label>
+                    <input
+                      type="text"
+                      placeholder="e.g. Brigade Road"
+                      value={dish.areaName}
+                      onChange={e => setDish({ ...dish, areaName: e.target.value })}
+                      style={{ width: '100%', padding: '8px', fontSize: '12px', borderRadius: '6px', border: '1px solid #cbd5e1', boxSizing: 'border-box' }}
+                      required
+                    />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: '11px', color: '#475569', fontWeight: '700', display: 'block', marginBottom: '2px' }}>City *</label>
+                    <input
+                      type="text"
+                      placeholder="e.g. Bengaluru"
+                      value={dish.city}
+                      onChange={e => setDish({ ...dish, city: e.target.value })}
+                      style={{ width: '100%', padding: '8px', fontSize: '12px', borderRadius: '6px', border: '1px solid #cbd5e1', boxSizing: 'border-box' }}
+                      required
+                    />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: '11px', color: '#475569', fontWeight: '700', display: 'block', marginBottom: '2px' }}>PIN Code</label>
+                    <input
+                      type="text"
+                      maxLength="6"
+                      placeholder="560001"
+                      value={dish.pincode}
+                      onChange={e => setDish({ ...dish, pincode: e.target.value })}
+                      style={{ width: '100%', padding: '8px', fontSize: '12px', borderRadius: '6px', border: '1px solid #cbd5e1', boxSizing: 'border-box' }}
+                    />
+                  </div>
+                </div>
               </div>
 
               <div style={{ marginBottom: '14px', background: '#f8fafc', padding: '12px', borderRadius: '8px', border: '1px dashed #94a3b8' }}>
@@ -692,9 +831,11 @@ const KitchenDashboard = () => {
             </form>
           )}
 
+          {/* Dish List */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '16px' }}>
             {foods.map((f) => {
               const isEditing = editingDishId === f._id;
+              const locationStr = [f.areaName, f.city].filter(Boolean).join(', ') || 'Local Hub';
               return (
                 <div
                   key={f._id}
@@ -707,7 +848,7 @@ const KitchenDashboard = () => {
                     flexDirection: 'column',
                     justifyContent: 'space-between',
                     boxShadow: '0 2px 8px rgba(0,0,0,0.02)',
-                    opacity: f.isAvailable ? 1 : 0.65
+                    opacity: f.isAvailable ? 1 : 0.75
                   }}
                 >
                   <div style={{ position: 'relative', height: '140px', background: '#f1f5f9', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -732,7 +873,7 @@ const KitchenDashboard = () => {
                   </div>
 
                   <div style={{ padding: '14px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
                       <strong style={{ fontSize: '15px', color: '#0f172a' }}>{f.title}</strong>
                       {!isEditing ? (
                         <span style={{ fontWeight: '800', color: '#16a34a', fontSize: '16px' }}>₹{f.price}</span>
@@ -744,6 +885,10 @@ const KitchenDashboard = () => {
                           style={{ width: '70px', padding: '4px', fontSize: '13px', borderRadius: '4px', border: '1px solid #cbd5e1' }}
                         />
                       )}
+                    </div>
+
+                    <div style={{ fontSize: '11px', color: '#64748b', marginBottom: '6px' }}>
+                      📍 {locationStr} {f.pincode ? `(${f.pincode})` : ''}
                     </div>
 
                     {!isEditing ? (
@@ -815,14 +960,12 @@ const KitchenDashboard = () => {
       {/* 3. WITHDRAW & PAYOUTS TAB */}
       {activeTab === 'withdraw' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-          
-          {/* Request Form */}
           <div style={{ background: '#ffffff', border: '2px solid #16a34a', borderRadius: '16px', padding: '24px', boxShadow: '0 4px 15px rgba(0,0,0,0.04)' }}>
             <h3 style={{ margin: '0 0 6px 0', fontSize: '18px', fontWeight: '800', color: '#0f172a' }}>
               💸 Request Kitchen Revenue Payout
             </h3>
             <p style={{ margin: '0 0 16px 0', fontSize: '13px', color: '#64748b' }}>
-              Transfer your earned meal revenue directly to your linked UPI ID or Bank Account.
+              Transfer your remaining net earned revenue directly to your UPI ID.
             </p>
 
             <form onSubmit={handleRequestWithdraw} style={{ display: 'grid', gridTemplateColumns: '1.2fr 1.5fr 1fr', gap: '12px', alignItems: 'flex-end' }}>
@@ -834,7 +977,7 @@ const KitchenDashboard = () => {
                   type="number"
                   placeholder={`Max ₹${stats.available}`}
                   value={withdrawAmount}
-                  max={stats.available > 0 ? stats.available : 999999}
+                  max={stats.available > 0 ? stats.available : 0}
                   onChange={e => setWithdrawAmount(e.target.value)}
                   style={{ width: '100%', padding: '10px 12px', borderRadius: '8px', border: '1px solid #cbd5e1', fontSize: '14px', boxSizing: 'border-box' }}
                   required
@@ -858,17 +1001,17 @@ const KitchenDashboard = () => {
               <div>
                 <button
                   type="submit"
-                  disabled={isSubmittingWithdraw}
+                  disabled={isSubmittingWithdraw || stats.available <= 0}
                   style={{
                     width: '100%',
-                    background: '#16a34a',
+                    background: stats.available > 0 ? '#16a34a' : '#94a3b8',
                     color: '#ffffff',
                     border: 'none',
                     padding: '11px',
                     borderRadius: '8px',
                     fontWeight: '800',
                     fontSize: '13px',
-                    cursor: 'pointer'
+                    cursor: stats.available > 0 ? 'pointer' : 'not-allowed'
                   }}
                 >
                   {isSubmittingWithdraw ? 'Processing...' : '⚡ Instant Withdraw'}
@@ -877,7 +1020,6 @@ const KitchenDashboard = () => {
             </form>
           </div>
 
-          {/* Withdrawals History */}
           <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '16px', padding: '20px' }}>
             <h4 style={{ margin: '0 0 14px 0', fontSize: '16px', fontWeight: '800', color: '#0f172a' }}>
               📑 Payouts & Settlement History ({withdrawals.length})
@@ -904,7 +1046,7 @@ const KitchenDashboard = () => {
                   >
                     <div>
                       <strong style={{ fontSize: '14px', color: '#0f172a' }}>
-                        Ref #{w.referenceId || w._id.slice(-6).toUpperCase()}
+                        Ref #{w.referenceId || (w._id || '').slice(-6).toUpperCase()}
                       </strong>
                       <span style={{ display: 'block', fontSize: '12px', color: '#64748b', marginTop: '2px' }}>
                         Transfer to: <strong>{w.payoutDetails || 'UPI ID'}</strong> • {new Date(w.requestedAt || Date.now()).toLocaleString()}
@@ -932,4 +1074,4 @@ const KitchenDashboard = () => {
   );
 };
 
-export default KitchenDashboard;
+export default SellerHome;

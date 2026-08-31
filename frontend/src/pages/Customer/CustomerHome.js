@@ -1,9 +1,9 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import axios from 'axios';
 import io from 'socket.io-client';
-import { getCoordsFromLocation, calculateDistanceKm } from '../../utils/geoMapper';
+import { isDeliverable } from '../../utils/geoMapper';
 
-const socket = io('/', { transports: ['websocket', 'polling'] });
+const socket = io(window.location.origin, { transports: ['websocket', 'polling'] });
 
 const CustomerHome = ({
   searchQuery = '',
@@ -12,30 +12,61 @@ const CustomerHome = ({
   updateQuantity,
   wishlist = [],
   toggleWishlist,
-  currentLocation = '📍 Home: Ashok Nagar, Bangalore (560002)'
+  currentLocation = ''
 }) => {
   const [foods, setFoods] = useState([]);
   const [selectedCategory, setSelectedCategory] = useState('All');
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    const fetchFoods = async () => {
-      try {
-        const res = await axios.get('/api/food/all');
-        if (Array.isArray(res.data)) {
-          setFoods(res.data);
-        }
-      } catch (err) {
-        console.error('Error fetching foods:', err);
-      } finally {
-        setLoading(false);
-      }
-    };
+  // Read location instantly on prop change
+  const activeHub = currentLocation || localStorage.getItem('user_delivery_hub') || '📍 Select Delivery Location';
+  const activeHubClean = activeHub.replace(/📍/g, '').trim();
 
-    fetchFoods();
+  const formatFoodItem = useCallback((item) => {
+    const area = (item.areaName || '').trim();
+    const city = (item.city || '').trim();
+    const pin = (item.pincode || '').trim();
+
+    const locParts = [area, city].filter(Boolean);
+    const formattedLoc = locParts.length > 0 ? locParts.join(', ') : 'Local Kitchen';
+    const pinDisplay = pin ? ` - ${pin}` : '';
+
+    return {
+      ...item,
+      areaName: area,
+      city: city,
+      pincode: pin,
+      fullLocationText: `${formattedLoc}${pinDisplay}`,
+      isAvailable: item.isAvailable !== false
+    };
+  }, []);
+
+  const fetchAllFoods = useCallback(async (isInitialLoad = false) => {
+    try {
+      if (isInitialLoad) setLoading(true);
+      const res = await axios.get('/api/food/all');
+      const dataArray = Array.isArray(res.data) ? res.data : (res.data?.foods || []);
+      setFoods(dataArray.map(formatFoodItem));
+    } catch (err) {
+      console.error('Error fetching foods:', err);
+    } finally {
+      if (isInitialLoad) setLoading(false);
+    }
+  }, [formatFoodItem]);
+
+  useEffect(() => {
+    fetchAllFoods(true);
+
+    const interval = setInterval(() => {
+      fetchAllFoods(false);
+    }, 3000);
 
     socket.on('food_added', (newFood) => {
-      setFoods((prev) => [newFood, ...prev.filter((f) => f._id !== newFood._id)]);
+      setFoods((prev) => [formatFoodItem(newFood), ...prev.filter((f) => f._id !== newFood._id)]);
+    });
+
+    socket.on('food_updated', (updatedFood) => {
+      setFoods((prev) => prev.map((f) => (f._id === updatedFood._id ? formatFoodItem(updatedFood) : f)));
     });
 
     socket.on('food_deleted', (deletedId) => {
@@ -43,49 +74,26 @@ const CustomerHome = ({
     });
 
     return () => {
+      clearInterval(interval);
       socket.off('food_added');
+      socket.off('food_updated');
       socket.off('food_deleted');
     };
-  }, []);
+  }, [fetchAllFoods, formatFoodItem]);
 
-  // User delivery coordinates
-  const userCoords = useMemo(() => {
-    return getCoordsFromLocation(currentLocation);
-  }, [currentLocation]);
-
-  // Strict 10 KM Filter
-  const nearbyFoods = useMemo(() => {
-    return foods
-      .map((food) => {
-        const foodCoords = (food.lat && food.lng)
-          ? { lat: food.lat, lng: food.lng }
-          : getCoordsFromLocation(`${food.areaName || ''} ${food.city || ''}`, food.pincode);
-
-        const dist = calculateDistanceKm(
-          userCoords.lat,
-          userCoords.lng,
-          foodCoords.lat,
-          foodCoords.lng
-        );
-
-        const eta = Math.max(15, Math.round(dist * 4 + 10));
-
-        return {
-          ...food,
-          distanceKm: dist,
-          etaMins: eta
-        };
-      })
-      .filter((food) => food.distanceKm <= 10);
-  }, [foods, userCoords]);
-
-  // Filter by category and search
+  // Reactive Instant Location Filtering without page refresh
   const filteredFoods = useMemo(() => {
-    return nearbyFoods.filter((item) => {
+    return foods.filter((item) => {
+      // 1. Deliverability Check
+      const canDeliver = isDeliverable(currentLocation || activeHub, item);
+      if (!canDeliver) return false;
+
+      // 2. Category Filter
       const matchesCategory =
         selectedCategory === 'All' ||
         (item.protein && item.protein.toLowerCase().includes(selectedCategory.toLowerCase()));
 
+      // 3. Search Filter
       const query = searchQuery.toLowerCase().trim();
       const matchesSearch =
         !query ||
@@ -93,41 +101,46 @@ const CustomerHome = ({
         item.description?.toLowerCase().includes(query) ||
         item.sellerName?.toLowerCase().includes(query) ||
         item.areaName?.toLowerCase().includes(query) ||
-        item.city?.toLowerCase().includes(query);
+        item.city?.toLowerCase().includes(query) ||
+        item.pincode?.includes(query);
 
       return matchesCategory && matchesSearch;
     });
-  }, [nearbyFoods, selectedCategory, searchQuery]);
+  }, [foods, selectedCategory, searchQuery, currentLocation, activeHub]);
 
   const categories = ['All', 'High Protein', 'Salad', 'Keto', 'Bowl'];
 
   return (
     <div style={{ maxWidth: '1200px', margin: '0 auto', padding: '16px 14px', boxSizing: 'border-box' }}>
-      
+
       {/* Banner */}
       <div style={{
         background: 'linear-gradient(135deg, #15803d 0%, #16a34a 100%)',
         color: '#ffffff',
-        padding: '24px 20px',
+        padding: '22px 20px',
         borderRadius: '16px',
         marginBottom: '20px',
         boxShadow: '0 4px 15px rgba(22, 163, 74, 0.2)'
       }}>
-        <h1 style={{ margin: '0 0 6px 0', fontSize: '22px', fontWeight: '800' }}>
-          Fresh & Healthy Meal Plans 🌱
-        </h1>
-        <p style={{ margin: '0 0 12px 0', fontSize: '13px', color: '#dcfce7' }}>
-          Hot meals prepared fresh and delivered directly from partner cloud kitchens within 10 KM.
-        </p>
-        <div style={{
-          background: 'rgba(0,0,0,0.18)',
-          display: 'inline-block',
-          padding: '6px 12px',
-          borderRadius: '20px',
-          fontSize: '12px',
-          fontWeight: '600'
-        }}>
-          Active Delivery Hub: {currentLocation}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
+          <div>
+            <h1 style={{ margin: '0 0 6px 0', fontSize: '22px', fontWeight: '800' }}>
+              Fresh & Healthy Meal Plans 🌱
+            </h1>
+            <p style={{ margin: '0 0 10px 0', fontSize: '13px', color: '#dcfce7' }}>
+              Delivering within 10 KM from verified cloud kitchens.
+            </p>
+          </div>
+          <div style={{
+            background: 'rgba(0,0,0,0.25)',
+            padding: '8px 14px',
+            borderRadius: '20px',
+            fontSize: '12px',
+            fontWeight: '700',
+            border: '1px solid rgba(255,255,255,0.2)'
+          }}>
+            📍 Delivery To: {activeHubClean}
+          </div>
         </div>
       </div>
 
@@ -157,7 +170,7 @@ const CustomerHome = ({
       {/* Header Info */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
         <h3 style={{ margin: 0, fontSize: '16px', fontWeight: '800', color: '#0f172a' }}>
-          🥗 Kitchens Delivering to You ({filteredFoods.length})
+          🥗 Kitchens Delivering in Your Area ({filteredFoods.length})
         </h3>
         <span style={{
           background: '#ecfdf5',
@@ -168,14 +181,14 @@ const CustomerHome = ({
           fontWeight: '800',
           border: '1px solid #86efac'
         }}>
-          ⚡ Fine-Tuned (≤ 10 KM)
+          ⚡ Live Kitchen Network
         </span>
       </div>
 
       {/* Food Grid */}
       {loading ? (
         <div style={{ textAlign: 'center', padding: '60px 20px', color: '#64748b' }}>
-          <span>🔄 Loading healthy meals near you...</span>
+          <span style={{ fontSize: '16px', fontWeight: '700' }}>🔄 Checking local kitchens...</span>
         </div>
       ) : filteredFoods.length === 0 ? (
         <div style={{
@@ -186,25 +199,26 @@ const CustomerHome = ({
           border: '1px dashed #cbd5e1',
           color: '#64748b'
         }}>
-          <span style={{ fontSize: '48px', display: 'block', marginBottom: '10px' }}>🍲</span>
-          <h4 style={{ margin: '0 0 6px 0', color: '#0f172a', fontSize: '16px' }}>No kitchens found within 10 KM</h4>
+          <span style={{ fontSize: '48px', display: 'block', marginBottom: '10px' }}>📍</span>
+          <h4 style={{ margin: '0 0 6px 0', color: '#0f172a', fontSize: '16px' }}>No Kitchens Delivering in This Area</h4>
           <p style={{ margin: 0, fontSize: '13px' }}>
-            Current delivery hub ki 10 KM radius lo partner kitchens levu.
+            We currently deliver within 10 KM of active kitchen hubs. Please select an active city hub.
           </p>
         </div>
       ) : (
         <div style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))',
+          gridTemplateColumns: 'repeat(auto-fill, minmax(270px, 1fr))',
           gap: '18px'
         }}>
           {filteredFoods.map((item) => {
-            const inCart = cart.find((c) => c._id === item._id);
-            const isWish = wishlist.some((w) => w._id === item._id);
+            const inCart = (cart || []).find((c) => (c._id || c.id) === (item._id || item.id));
+            const isWish = (wishlist || []).some((w) => (w._id || w.id) === (item._id || item.id));
+            const isAvailable = item.isAvailable !== false;
 
             return (
               <div
-                key={item._id}
+                key={item._id || item.id}
                 style={{
                   background: '#ffffff',
                   border: '1px solid #e2e8f0',
@@ -213,23 +227,25 @@ const CustomerHome = ({
                   boxShadow: '0 2px 8px rgba(0,0,0,0.03)',
                   display: 'flex',
                   flexDirection: 'column',
-                  position: 'relative'
+                  position: 'relative',
+                  opacity: isAvailable ? 1 : 0.7
                 }}
               >
-                {/* Distance & ETA Badge */}
+                {/* Distance Badge */}
                 <div style={{
                   position: 'absolute',
                   top: '10px',
                   left: '10px',
-                  background: 'rgba(15, 23, 42, 0.75)',
+                  background: 'rgba(15, 23, 42, 0.8)',
                   color: '#ffffff',
-                  padding: '3px 8px',
+                  padding: '4px 9px',
                   borderRadius: '6px',
                   fontSize: '11px',
                   fontWeight: '700',
-                  backdropFilter: 'blur(4px)'
+                  backdropFilter: 'blur(4px)',
+                  zIndex: 2
                 }}>
-                  📍 {item.distanceKm} km • ⏱️ {item.etaMins} mins
+                  📍 In-Range Kitchen • ⏱️ ~25 mins
                 </div>
 
                 {/* Wishlist Button */}
@@ -243,51 +259,80 @@ const CustomerHome = ({
                     background: '#ffffff',
                     border: 'none',
                     borderRadius: '50%',
-                    width: '28px',
-                    height: '28px',
+                    width: '30px',
+                    height: '30px',
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
                     cursor: 'pointer',
                     boxShadow: '0 2px 6px rgba(0,0,0,0.15)',
-                    fontSize: '14px'
+                    fontSize: '14px',
+                    zIndex: 2
                   }}
                 >
                   {isWish ? '💚' : '🤍'}
                 </button>
 
                 {/* Food Image */}
-                <img
-                  src={item.imageUrl || 'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=500'}
-                  alt={item.title}
-                  style={{ width: '100%', height: '160px', objectFit: 'cover' }}
-                />
+                <div style={{ position: 'relative', width: '100%', height: '160px', background: '#f1f5f9' }}>
+                  <img
+                    src={item.imageUrl || 'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=500'}
+                    alt={item.title}
+                    style={{ width: '100%', height: '160px', objectFit: 'cover' }}
+                  />
+                  {!isAvailable && (
+                    <div style={{
+                      position: 'absolute',
+                      inset: 0,
+                      background: 'rgba(15, 23, 42, 0.65)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      color: '#ffffff',
+                      fontWeight: '800',
+                      fontSize: '13px'
+                    }}>
+                      🔴 OUT OF STOCK
+                    </div>
+                  )}
+                </div>
 
                 {/* Body */}
                 <div style={{ padding: '14px', flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
                   <div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
-                      <h4 style={{ margin: 0, fontSize: '15px', color: '#0f172a', fontWeight: '800' }}>
-                        {item.title}
-                      </h4>
+                    <h4 style={{ margin: '0 0 4px 0', fontSize: '15px', color: '#0f172a', fontWeight: '800' }}>
+                      {item.title}
+                    </h4>
+
+                    <div style={{ fontSize: '12px', color: '#15803d', fontWeight: '700', marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap' }}>
+                      <span>👨‍🍳 {item.sellerName || 'Kitchen Partner'}</span>
+                      {item.branchName && (
+                        <span style={{ background: '#ecfdf5', color: '#16a34a', padding: '1px 6px', borderRadius: '4px', fontSize: '10px' }}>
+                          {item.branchName}
+                        </span>
+                      )}
                     </div>
 
-                    <div style={{ fontSize: '11px', color: '#64748b', marginBottom: '6px' }}>
-                      👨‍🍳 {item.sellerName || 'Partner Kitchen'} • 📍 {item.areaName || ''}, {item.city || ''} ({item.pincode || ''})
+                    <div style={{ fontSize: '11px', color: '#64748b', marginBottom: '8px' }}>
+                      📍 <strong>Dispatch:</strong> {item.fullLocationText}
                     </div>
 
                     <p style={{ margin: '0 0 10px 0', color: '#475569', fontSize: '12px', lineHeight: '1.4' }}>
-                      {item.description}
+                      {item.description || 'Fresh nutrient-rich balanced meal cooked with organic ingredients.'}
                     </p>
                   </div>
 
-                  {/* Price & Add */}
+                  {/* Price & Action */}
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: '10px', borderTop: '1px solid #f1f5f9' }}>
-                    <span style={{ fontSize: '16px', fontWeight: '800', color: '#0f172a' }}>
+                    <span style={{ fontSize: '17px', fontWeight: '800', color: '#0f172a' }}>
                       ₹{item.price}
                     </span>
 
-                    {inCart ? (
+                    {!isAvailable ? (
+                      <span style={{ fontSize: '11px', fontWeight: '700', color: '#dc2626', background: '#fee2e2', padding: '4px 8px', borderRadius: '6px' }}>
+                        Sold Out
+                      </span>
+                    ) : inCart ? (
                       <div style={{
                         display: 'flex',
                         alignItems: 'center',
@@ -296,7 +341,7 @@ const CustomerHome = ({
                         borderRadius: '6px'
                       }}>
                         <button
-                          onClick={() => updateQuantity(item._id, -1)}
+                          onClick={() => updateQuantity((item._id || item.id), -1)}
                           style={{ background: 'transparent', border: 'none', padding: '4px 10px', color: '#15803d', fontWeight: 'bold', cursor: 'pointer' }}
                         >
                           -
@@ -305,7 +350,7 @@ const CustomerHome = ({
                           {inCart.qty}
                         </span>
                         <button
-                          onClick={() => updateQuantity(item._id, 1)}
+                          onClick={() => updateQuantity((item._id || item.id), 1)}
                           style={{ background: 'transparent', border: 'none', padding: '4px 10px', color: '#15803d', fontWeight: 'bold', cursor: 'pointer' }}
                         >
                           +
@@ -318,7 +363,7 @@ const CustomerHome = ({
                           background: '#16a34a',
                           color: '#ffffff',
                           border: 'none',
-                          padding: '6px 14px',
+                          padding: '7px 16px',
                           borderRadius: '6px',
                           fontWeight: '700',
                           fontSize: '12px',

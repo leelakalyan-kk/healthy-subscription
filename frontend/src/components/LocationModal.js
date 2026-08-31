@@ -1,40 +1,67 @@
-import React, { useState } from 'react';
-
-const POPULAR_HUBS = [
-  { name: 'Bangalore - Ashok Nagar (560002)', city: 'Bangalore', pin: '560002' },
-  { name: 'Bangalore - Indiranagar (560038)', city: 'Bangalore', pin: '560038' },
-  { name: 'Hyderabad - Jubilee Hills (500033)', city: 'Hyderabad', pin: '500033' },
-  { name: 'Hyderabad - Madhapur (500081)', city: 'Hyderabad', pin: '500081' },
-  { name: 'Visakhapatnam - Siripuram (530003)', city: 'Visakhapatnam', pin: '530003' },
-  { name: 'Visakhapatnam - MVP Colony (530017)', city: 'Visakhapatnam', pin: '530017' },
-  { name: 'Vijayawada - Benz Circle (520001)', city: 'Vijayawada', pin: '520001' },
-  { name: 'Vijayawada - Patamata (520010)', city: 'Vijayawada', pin: '520010' }
-];
+import React, { useState, useEffect, useMemo } from 'react';
+import axios from 'axios';
 
 const LocationModal = ({ isOpen, onClose, currentLocation, setCurrentLocation }) => {
   const [customArea, setCustomArea] = useState('');
   const [customCity, setCustomCity] = useState('');
   const [customPin, setCustomPin] = useState('');
+  const [foods, setFoods] = useState([]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    axios.get('/api/food/all')
+      .then(res => {
+        if (Array.isArray(res.data)) setFoods(res.data);
+      })
+      .catch(err => console.error('Error fetching hub locations:', err));
+  }, [isOpen]);
+
+  const liveKitchenHubs = useMemo(() => {
+    const hubMap = new Map();
+    foods.forEach(f => {
+      const area = (f.areaName || '').trim();
+      const city = (f.city || '').trim();
+      const pin = (f.pincode || '').trim();
+
+      if (city || area) {
+        const key = `${area}_${city}_${pin}`.toLowerCase();
+        if (!hubMap.has(key)) {
+          const displayName = [area, city].filter(Boolean).join(', ') + (pin ? ` (${pin})` : '');
+          hubMap.set(key, {
+            name: displayName,
+            city: city,
+            area: area,
+            pin: pin
+          });
+        }
+      }
+    });
+    return Array.from(hubMap.values());
+  }, [foods]);
 
   if (!isOpen) return null;
 
-  const handleSelectHub = (hubName) => {
-    setCurrentLocation(`📍 ${hubName}`);
+  const updateGlobalLocation = (newLoc) => {
+    setCurrentLocation(newLoc);
+    localStorage.setItem('user_delivery_hub', newLoc);
+    window.dispatchEvent(new CustomEvent('location_changed', { detail: newLoc }));
     onClose();
+  };
+
+  const handleSelectHub = (hub) => {
+    const loc = `📍 ${hub.name}`;
+    updateGlobalLocation(loc);
   };
 
   const handleSaveCustomLocation = (e) => {
     e.preventDefault();
-    if (!customArea.trim() || !customCity.trim() || !customPin.trim()) {
-      alert('Please fill in Area, City and 6-digit PIN code!');
+    if (!customArea.trim() || !customCity.trim()) {
+      alert('Please fill in Area and City!');
       return;
     }
-    if (customPin.trim().length !== 6) {
-      alert('Please enter a valid 6-digit PIN code!');
-      return;
-    }
-    setCurrentLocation(`📍 ${customArea.trim()}, ${customCity.trim()} (${customPin.trim()})`);
-    onClose();
+    const pinStr = customPin.trim() ? ` (${customPin.trim()})` : '';
+    const loc = `📍 ${customArea.trim()}, ${customCity.trim()}${pinStr}`;
+    updateGlobalLocation(loc);
   };
 
   return (
@@ -76,7 +103,7 @@ const LocationModal = ({ isOpen, onClose, currentLocation, setCurrentLocation })
               📍 Select Delivery Location
             </h3>
             <p style={{ margin: '4px 0 0 0', fontSize: '12px', color: '#64748b' }}>
-              We deliver from cloud kitchens within 10 KM
+              Live filtering kitchens delivering within 10 KM
             </p>
           </div>
           <button
@@ -98,16 +125,14 @@ const LocationModal = ({ isOpen, onClose, currentLocation, setCurrentLocation })
 
         {/* Content */}
         <div style={{ padding: '20px' }}>
-          
-          {/* Custom Location Form */}
           <form onSubmit={handleSaveCustomLocation} style={{ marginBottom: '20px' }}>
             <span style={{ fontSize: '12px', fontWeight: '700', color: '#334155', display: 'block', marginBottom: '8px' }}>
-              Enter Any Custom Location in India:
+              Enter Your Delivery Address:
             </span>
             <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr 1fr', gap: '8px', marginBottom: '10px' }}>
               <input
                 type="text"
-                placeholder="Area (e.g. Alwal)"
+                placeholder="Area / Street"
                 value={customArea}
                 onChange={e => setCustomArea(e.target.value)}
                 style={{ padding: '8px 10px', borderRadius: '8px', border: '1px solid #cbd5e1', fontSize: '12px' }}
@@ -128,7 +153,6 @@ const LocationModal = ({ isOpen, onClose, currentLocation, setCurrentLocation })
                 value={customPin}
                 onChange={e => setCustomPin(e.target.value)}
                 style={{ padding: '8px 10px', borderRadius: '8px', border: '1px solid #cbd5e1', fontSize: '12px' }}
-                required
               />
             </div>
             <button
@@ -145,40 +169,47 @@ const LocationModal = ({ isOpen, onClose, currentLocation, setCurrentLocation })
                 cursor: 'pointer'
               }}
             >
-              Set Custom Delivery Location
+              Set Delivery Location
             </button>
           </form>
 
-          <div style={{ borderTop: '1px solid #f1f5f9', paddingTop: '16px' }}>
-            <span style={{ fontSize: '12px', fontWeight: '700', color: '#64748b', display: 'block', marginBottom: '10px' }}>
-              Popular Delivery Hubs:
-            </span>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              {POPULAR_HUBS.map((hub, idx) => (
-                <button
-                  key={idx}
-                  onClick={() => handleSelectHub(hub.name)}
-                  style={{
-                    padding: '10px 14px',
-                    borderRadius: '10px',
-                    border: currentLocation.includes(hub.pin) ? '2px solid #16a34a' : '1px solid #e2e8f0',
-                    background: currentLocation.includes(hub.pin) ? '#ecfdf5' : '#ffffff',
-                    color: currentLocation.includes(hub.pin) ? '#16a34a' : '#334155',
-                    fontSize: '13px',
-                    fontWeight: '600',
-                    textAlign: 'left',
-                    cursor: 'pointer',
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center'
-                  }}
-                >
-                  <span>📍 {hub.name}</span>
-                  {currentLocation.includes(hub.pin) && <span>✓</span>}
-                </button>
-              ))}
+          {/* Dynamic Active Kitchens from DB */}
+          {liveKitchenHubs.length > 0 && (
+            <div style={{ borderTop: '1px solid #f1f5f9', paddingTop: '16px' }}>
+              <span style={{ fontSize: '12px', fontWeight: '700', color: '#64748b', display: 'block', marginBottom: '10px' }}>
+                🟢 Active Kitchen Hubs Delivering Now ({liveKitchenHubs.length}):
+              </span>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                {liveKitchenHubs.map((hub, idx) => {
+                  const isSelected = (currentLocation || '').toLowerCase().includes(hub.area.toLowerCase()) || 
+                                     (hub.pin && (currentLocation || '').includes(hub.pin));
+                  return (
+                    <button
+                      key={idx}
+                      onClick={() => handleSelectHub(hub)}
+                      style={{
+                        padding: '10px 14px',
+                        borderRadius: '10px',
+                        border: isSelected ? '2px solid #16a34a' : '1px solid #e2e8f0',
+                        background: isSelected ? '#ecfdf5' : '#ffffff',
+                        color: isSelected ? '#16a34a' : '#334155',
+                        fontSize: '13px',
+                        fontWeight: '600',
+                        textAlign: 'left',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center'
+                      }}
+                    >
+                      <span>📍 {hub.name}</span>
+                      {isSelected && <span style={{ fontWeight: 'bold' }}>✓</span>}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
-          </div>
+          )}
 
         </div>
       </div>

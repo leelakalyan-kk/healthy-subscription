@@ -19,7 +19,21 @@ function App() {
   const [isCartOpen, setIsCartOpen] = useState(false);
   const [isWishlistOpen, setIsWishlistOpen] = useState(false);
   const [isLocationModalOpen, setIsLocationModalOpen] = useState(false);
-  const [currentLocation, setCurrentLocation] = useState(() => localStorage.getItem('user_delivery_hub') || '📍 Home: Ashok Nagar, Bangalore (560002)');
+
+  const [currentLocation, setCurrentLocation] = useState(() => {
+    return localStorage.getItem('user_delivery_hub') || '📍 Select Delivery Location';
+  });
+
+  // Listen to instant location change event anywhere across the app
+  useEffect(() => {
+    const handleLocChange = (e) => {
+      if (e.detail) {
+        setCurrentLocation(e.detail);
+      }
+    };
+    window.addEventListener('location_changed', handleLocChange);
+    return () => window.removeEventListener('location_changed', handleLocChange);
+  }, []);
 
   useEffect(() => {
     localStorage.setItem('user_cart', JSON.stringify(cart));
@@ -28,10 +42,6 @@ function App() {
   useEffect(() => {
     localStorage.setItem('user_wishlist', JSON.stringify(wishlist));
   }, [wishlist]);
-
-  useEffect(() => {
-    localStorage.setItem('user_delivery_hub', currentLocation);
-  }, [currentLocation]);
 
   const addToCart = (food) => {
     setCart(prev => {
@@ -72,8 +82,7 @@ function App() {
 
   return (
     <div style={{ minHeight: '100vh', background: '#f8fafc', display: 'flex', flexDirection: 'column' }}>
-      
-      {/* Hide Customer Navbar for Kitchen Partners */}
+
       {!isSeller && (
         <Navbar
           searchQuery={searchQuery}
