@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useContext, useCallback } from 'react';
+import React, { useState, useEffect, useContext, useCallback, useRef } from 'react';
 import axios from 'axios';
 import io from 'socket.io-client';
 import { AuthContext } from '../../context/AuthContext';
@@ -19,48 +19,182 @@ const Account = () => {
   const { currentUser, logout } = useContext(AuthContext);
   const user = currentUser || JSON.parse(localStorage.getItem('active_user') || '{}');
 
-  const userEmail = user.email || (user.username ? `${user.username}@healthybites.com` : 'user@healthybites.com');
+  const userEmail = user.email || (user.username ? user.username + '@healthybites.com' : '');
   const userName = user.username || user.name || 'Customer';
-  const userPhone = user.phone || '8074095895';
-  const userIdentifier = user._id || user.id || user.username || 'user_1';
+  const userPhone = user.phone || '';
+  const userIdentifier = user._id || user.id || user.username || '';
 
   const [activeTab, setActiveTab] = useState('orders');
   const [orders, setOrders] = useState([]);
   const [subscriptions, setSubscriptions] = useState([]);
   const [menuFoods, setMenuFoods] = useState([]);
 
-  // Persistent Wallet State
+  // Dynamic Wallet State
   const [walletBalance, setWalletBalance] = useState(() => {
-    const saved = localStorage.getItem(`wallet_${userIdentifier}`);
-    if (saved !== null) return Number(saved);
-    localStorage.setItem(`wallet_${userIdentifier}`, '250');
-    return 250;
+    const saved = localStorage.getItem('wallet_' + userIdentifier);
+    return saved !== null ? Number(saved) : (Number(user.walletBalance) || 0);
   });
 
   const [topupAmount, setTopupAmount] = useState('');
   const [walletTxns, setWalletTxns] = useState(() => {
-    return JSON.parse(localStorage.getItem(`wallet_txns_${userIdentifier}`) || '[{"id":"TXN_INIT","desc":"Welcome Bonus","amount":250,"type":"CR","time":"Joined"}]');
+    return JSON.parse(localStorage.getItem('wallet_txns_' + userIdentifier) || '[]');
   });
 
-  // Saved Addresses State
+  // Dynamic Saved Addresses
   const [addresses, setAddresses] = useState(() => {
-    return JSON.parse(localStorage.getItem(`user_addresses_${userIdentifier}`) || JSON.stringify([
-      { id: 'addr_1', type: 'Home', address: 'D.No: 19-14/1-142A, Arundalpet, Near Water Tank, Vijayawada - 520002', isDefault: true }
-    ]));
+    return JSON.parse(localStorage.getItem('user_addresses_' + userIdentifier) || '[]');
   });
   const [showAddAddress, setShowAddAddress] = useState(false);
-  const [newAddr, setNewAddr] = useState({ type: 'Home', flat: '', street: '', landmark: '', area: '', city: 'Vijayawada', pin: '520002' });
+  const [showMapPicker, setShowMapPicker] = useState(false);
+  const [mapAddressLoading, setMapAddressLoading] = useState(false);
+
+  const [newAddr, setNewAddr] = useState({
+    type: 'Home',
+    recipientPhone: user.phone || '',
+    flat: '',
+    street: '',
+    landmark: '',
+    area: user.areaName || '',
+    city: user.city || '',
+    pin: user.pincode || '',
+    lat: 16.5062,
+    lng: 80.6480
+  });
+
+  const mapContainerRef = useRef(null);
+  const mapInstanceRef = useRef(null);
+  const markerRef = useRef(null);
+
+  // Reverse geocode lat/lng to Street, Area, City, Pin
+  const reverseGeocodeCoords = async (lat, lng) => {
+    setMapAddressLoading(true);
+    try {
+      const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}`);
+      const data = await res.json();
+      if (data && data.address) {
+        const a = data.address;
+        setNewAddr(prev => ({
+          ...prev,
+          street: a.road || a.suburb || prev.street,
+          area: a.neighbourhood || a.suburb || a.residential || a.village || prev.area,
+          city: a.city || a.town || a.county || prev.city,
+          pin: a.postcode || prev.pin,
+          lat,
+          lng
+        }));
+      }
+    } catch (e) {
+      console.warn("Geocoding failed:", e);
+    } finally {
+      setMapAddressLoading(false);
+    }
+  };
+
+  // Initialize Interactive Map for Address Pinning
+  useEffect(() => {
+    if (!showMapPicker || !mapContainerRef.current) return;
+
+    const initMap = () => {
+      if (!window.L) return;
+      const initialLat = newAddr.lat || 16.5062;
+      const initialLng = newAddr.lng || 80.6480;
+
+      if (!mapInstanceRef.current) {
+        const map = window.L.map(mapContainerRef.current).setView([initialLat, initialLng], 14);
+        window.L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          maxZoom: 19,
+          attribution: '&copy; OpenStreetMap'
+        }).addTo(map);
+
+        const marker = window.L.marker([initialLat, initialLng], { draggable: true }).addTo(map);
+        marker.bindPopup("📍 Drag pin to your exact delivery doorstep").openPopup();
+
+        marker.on('dragend', (e) => {
+          const { lat, lng } = e.target.getLatLng();
+          reverseGeocodeCoords(lat, lng);
+        });
+
+        map.on('click', (e) => {
+          marker.setLatLng(e.latlng);
+          reverseGeocodeCoords(e.latlng.lat, e.latlng.lng);
+        });
+
+        mapInstanceRef.current = map;
+        markerRef.current = marker;
+      } else {
+        mapInstanceRef.current.invalidateSize();
+      }
+    };
+
+    if (!window.L) {
+      const link = document.createElement('link');
+      link.rel = 'stylesheet';
+      link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+      document.head.appendChild(link);
+
+      const script = document.createElement('script');
+      script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+      script.onload = initMap;
+      document.body.appendChild(script);
+    } else {
+      setTimeout(initMap, 100);
+    }
+  }, [showMapPicker]);
 
   // Tomorrow Meal Customizer
   const [customizingSub, setCustomizingSub] = useState(null);
   const [chosenMeal, setChosenMeal] = useState('');
   const [isSavingMeal, setIsSavingMeal] = useState(false);
 
-  // Review State
+  // Review State (Meal & Rider)
   const [selectedOrderForReview, setSelectedOrderForReview] = useState(null);
+  const [selectedOrderForRider, setSelectedOrderForRider] = useState(null);
   const [ratingVal, setRatingVal] = useState(5);
+  const [riderRatingVal, setRiderRatingVal] = useState(5);
   const [reviewComment, setReviewComment] = useState('');
+  const [riderComment, setRiderComment] = useState('');
   const [isSubmittingReview, setIsSubmittingReview] = useState(false);
+  const [isDeletingAccount, setIsDeletingAccount] = useState(false);
+
+  // Self Account Deletion with 30-day notice period
+  const handleDeleteMyAccount = async () => {
+    if (!window.confirm("⚠️ ARE YOU SURE YOU WANT TO DELETE YOUR ACCOUNT?\n\nNotice: Your account will be scheduled for permanent deletion in 30 days.\nIf you change your mind, simply log back in within 30 days to cancel this request and restore your account!")) {
+      return;
+    }
+    setIsDeletingAccount(true);
+    try {
+      const res = await axios.post('/api/auth/request-deletion', { userId: userIdentifier });
+      alert(res.data?.message || "Deletion request submitted.");
+      if (logout) logout();
+      window.location.href = '/login';
+    } catch (err) {
+      alert("Failed to submit deletion request: " + err.message);
+    } finally {
+      setIsDeletingAccount(false);
+    }
+  };
+
+  const handleRiderReviewSubmit = async (e) => {
+    e.preventDefault();
+    if (!selectedOrderForRider) return;
+    setIsSubmittingReview(true);
+    try {
+      await axios.post('/api/extra/rider-feedback/add', {
+        orderId: selectedOrderForRider._id,
+        riderName: selectedOrderForRider.assignedRiderName || 'Delivery Partner',
+        customerName: userName,
+        rating: riderRatingVal,
+        feedbackText: riderComment
+      });
+      alert('🛵 Thank you! Your feedback for the delivery partner has been recorded.');
+      setSelectedOrderForRider(null);
+      setRiderComment('');
+    } catch (err) {
+      alert('Feedback submission error: ' + err.message);
+    } finally {
+      setIsSubmittingReview(false);
+    }
+  };
 
   // Subscription Creation State
   const [showSubModal, setShowSubModal] = useState(false);
@@ -68,25 +202,23 @@ const Account = () => {
   const [selectedTier, setSelectedTier] = useState(MEAL_TIERS[0]);
   const [deliverySlot, setDeliverySlot] = useState('12:30 PM - 01:30 PM');
   const [paymentMode, setPaymentMode] = useState('wallet');
-  const [upiId, setUpiId] = useState(`${userName.toLowerCase()}@okhdfcbank`);
+  const [upiId, setUpiId] = useState(userName.toLowerCase() + '@okhdfcbank');
   const [isProcessingPayment, setIsProcessingPayment] = useState(false);
 
   const fetchUserData = useCallback(async () => {
+    if (!userIdentifier) return;
     try {
-      const ordersRes = await axios.get(`/api/orders/user-orders/${userIdentifier}`);
+      const ordersRes = await axios.get('/api/orders/user-orders/' + userIdentifier);
       if (Array.isArray(ordersRes.data)) {
-        const regularFoodOrders = ordersRes.data.filter(o =>
-          !o.items?.some(it => (it.title || '').toLowerCase().includes('pass') || (it.title || '').toLowerCase().includes('subscription'))
-        );
-        setOrders(regularFoodOrders);
+        setOrders(ordersRes.data);
       }
 
       if (userEmail) {
-        const subRes = await axios.get(`/api/extra/subscription/user/${userEmail}`);
+        const subRes = await axios.get('/api/extra/subscription/user/' + userEmail);
         if (Array.isArray(subRes.data)) setSubscriptions(subRes.data);
       }
 
-      const foodsRes = await axios.get(`/api/food/all`);
+      const foodsRes = await axios.get('/api/food/all');
       if (Array.isArray(foodsRes.data)) setMenuFoods(foodsRes.data);
     } catch (err) {
       console.error('Error fetching account data:', err);
@@ -119,10 +251,9 @@ const Account = () => {
     };
   }, [fetchUserData]);
 
-  // Sync wallet changes from storage
   useEffect(() => {
     const handleStorage = () => {
-      const currentBal = Number(localStorage.getItem(`wallet_${userIdentifier}`)) || 0;
+      const currentBal = Number(localStorage.getItem('wallet_' + userIdentifier)) || 0;
       setWalletBalance(currentBal);
     };
     window.addEventListener('storage', handleStorage);
@@ -135,7 +266,7 @@ const Account = () => {
     if (!addAmt || addAmt <= 0) return alert('Enter valid amount');
     const newBal = walletBalance + addAmt;
     setWalletBalance(newBal);
-    localStorage.setItem(`wallet_${userIdentifier}`, String(newBal));
+    localStorage.setItem('wallet_' + userIdentifier, String(newBal));
 
     const newTxn = {
       id: 'TXN_' + Math.floor(100000 + Math.random() * 900000),
@@ -146,43 +277,53 @@ const Account = () => {
     };
     const updatedTxns = [newTxn, ...walletTxns];
     setWalletTxns(updatedTxns);
-    localStorage.setItem(`wallet_txns_${userIdentifier}`, JSON.stringify(updatedTxns));
+    localStorage.setItem('wallet_txns_' + userIdentifier, JSON.stringify(updatedTxns));
     setTopupAmount('');
-    alert(`🎉 ₹${addAmt} added to your Wallet! New Balance: ₹${newBal}`);
+    alert('Added ₹' + addAmt + ' to your Wallet! New Balance: ₹' + newBal);
   };
 
   // Address Handlers
   const handleSaveNewAddress = (e) => {
     e.preventDefault();
-    const formatted = `${newAddr.flat ? newAddr.flat + ', ' : ''}${newAddr.street}, ${newAddr.landmark ? 'Near ' + newAddr.landmark + ', ' : ''}${newAddr.area}, ${newAddr.city} - ${newAddr.pin}`;
+    if (!newAddr.recipientPhone || !/^[0-9]{10}$/.test(newAddr.recipientPhone.trim())) {
+      return alert('⚠️ Please enter a valid 10-digit recipient contact number.');
+    }
+    if (!newAddr.street.trim() || !newAddr.area.trim() || !newAddr.city.trim()) {
+      return alert('Please fill in Street, Area and City.');
+    }
+    const formatted = (newAddr.flat ? newAddr.flat + ', ' : '') + newAddr.street + (newAddr.landmark ? ', Near ' + newAddr.landmark : '') + ', ' + newAddr.area + ', ' + newAddr.city + (newAddr.pin ? ' - ' + newAddr.pin : '');
     const newAddressObj = {
       id: 'addr_' + Date.now(),
       type: newAddr.type,
+      recipientPhone: newAddr.recipientPhone.trim(),
       address: formatted,
+      lat: newAddr.lat,
+      lng: newAddr.lng,
       isDefault: addresses.length === 0
     };
     const updated = [...addresses, newAddressObj];
     setAddresses(updated);
-    localStorage.setItem(`user_addresses_${userIdentifier}`, JSON.stringify(updated));
-    const loc = `📍 ${formatted}`;
+    localStorage.setItem('user_addresses_' + userIdentifier, JSON.stringify(updated));
+    const loc = '📍 ' + formatted;
     localStorage.setItem('user_delivery_hub', loc);
     window.dispatchEvent(new CustomEvent('location_changed', { detail: loc }));
     setShowAddAddress(false);
-    setNewAddr({ type: 'Home', flat: '', street: '', landmark: '', area: '', city: 'Vijayawada', pin: '520002' });
-    alert('📍 New address saved and updated live!');
+    setShowMapPicker(false);
+    setNewAddr({ type: 'Home', recipientPhone: user.phone || '', flat: '', street: '', landmark: '', area: '', city: '', pin: '', lat: 16.5062, lng: 80.6480 });
+    alert('📍 New address saved successfully!');
   };
 
   const handleDeleteAddress = (addrId) => {
     const updated = addresses.filter(a => a.id !== addrId);
     setAddresses(updated);
-    localStorage.setItem(`user_addresses_${userIdentifier}`, JSON.stringify(updated));
+    localStorage.setItem('user_addresses_' + userIdentifier, JSON.stringify(updated));
   };
 
   const handleSetDefaultAddress = (addr) => {
     const updated = addresses.map(a => ({ ...a, isDefault: a.id === addr.id }));
     setAddresses(updated);
-    localStorage.setItem(`user_addresses_${userIdentifier}`, JSON.stringify(updated));
-    const newLoc = `📍 ${addr.address}`;
+    localStorage.setItem('user_addresses_' + userIdentifier, JSON.stringify(updated));
+    const newLoc = '📍 ' + addr.address;
     localStorage.setItem('user_delivery_hub', newLoc);
     window.dispatchEvent(new CustomEvent('location_changed', { detail: newLoc }));
     alert('✅ Delivery address updated live to: ' + addr.type);
@@ -220,25 +361,25 @@ const Account = () => {
 
       doc.setFontSize(10);
       doc.setTextColor(51, 65, 85);
-      doc.text(`Order Reference ID: #${orderFullId}`, 14, 35);
-      doc.text(`Invoice Number: HB-INV-${orderShortId}`, 14, 41);
-      doc.text(`Order Date & Time: ${new Date(order.createdAt || Date.now()).toLocaleString('en-IN', { hour12: true })}`, 14, 47);
-      doc.text(`Customer: ${userName} (${userEmail})`, 14, 53);
-      doc.text(`Payment: ${order.paymentType || 'Sandbox (UPI)'} [PAID]`, 14, 59);
-      doc.text(`Address: ${order.deliveryAddress || 'Saved Customer Location'}`, 14, 65);
+      doc.text('Order Reference ID: #' + orderFullId, 14, 35);
+      doc.text('Invoice Number: HB-INV-' + orderShortId, 14, 41);
+      doc.text('Order Date: ' + new Date(order.createdAt || Date.now()).toLocaleString('en-IN', { hour12: true }), 14, 47);
+      doc.text('Customer: ' + userName + (userEmail ? ' (' + userEmail + ')' : ''), 14, 53);
+      doc.text('Payment: ' + (order.paymentType || 'Paid') + ' [COMPLETED]', 14, 59);
+      doc.text('Address: ' + (order.deliveryAddress || 'Saved Address'), 14, 65);
 
       const tableRows = (order.items || []).map((item, idx) => [
         idx + 1,
         item.title || 'Healthy Meal Dish',
         item.qty || 1,
-        `Rs. ${item.price}`,
-        `Rs. ${(Number(item.price) * Number(item.qty || 1))}`
+        'Rs. ' + item.price,
+        'Rs. ' + (Number(item.price) * Number(item.qty || 1))
       ]);
 
       autoTable(doc, {
         startY: 72,
         head: [['#', 'Item Description', 'Qty', 'Rate', 'Amount']],
-        body: tableRows.length > 0 ? tableRows : [[1, 'Fresh Meal', 1, `Rs. ${bill.subtotal}`, `Rs. ${bill.subtotal}`]],
+        body: tableRows.length > 0 ? tableRows : [[1, 'Fresh Meal', 1, 'Rs. ' + bill.subtotal, 'Rs. ' + bill.subtotal]],
         headStyles: { fillColor: [15, 23, 42], textColor: 255, fontStyle: 'bold' },
         styles: { fontSize: 9 }
       });
@@ -246,20 +387,20 @@ const Account = () => {
       let currentY = doc.lastAutoTable.finalY + 8;
       doc.setFontSize(10);
       doc.setTextColor(71, 85, 105);
-      doc.text(`Item Subtotal:`, 130, currentY);
-      doc.text(`Rs. ${bill.subtotal}`, 180, currentY, { align: 'right' });
+      doc.text('Item Subtotal:', 130, currentY);
+      doc.text('Rs. ' + bill.subtotal, 180, currentY, { align: 'right' });
 
       currentY += 6;
-      doc.text(`GST (5% Restaurant Tax):`, 130, currentY);
-      doc.text(`Rs. ${bill.gstAmount}`, 180, currentY, { align: 'right' });
+      doc.text('GST (5% Restaurant Tax):', 130, currentY);
+      doc.text('Rs. ' + bill.gstAmount, 180, currentY, { align: 'right' });
 
       currentY += 6;
-      doc.text(`Platform Fee:`, 130, currentY);
-      doc.text(`Rs. ${bill.platformFee}`, 180, currentY, { align: 'right' });
+      doc.text('Platform Fee:', 130, currentY);
+      doc.text('Rs. ' + bill.platformFee, 180, currentY, { align: 'right' });
 
       currentY += 6;
-      doc.text(`Delivery Partner Fee:`, 130, currentY);
-      doc.text(bill.deliveryFee === 0 ? 'FREE' : `Rs. ${bill.deliveryFee}`, 180, currentY, { align: 'right' });
+      doc.text('Delivery Partner Fee:', 130, currentY);
+      doc.text(bill.deliveryFee === 0 ? 'FREE' : 'Rs. ' + bill.deliveryFee, 180, currentY, { align: 'right' });
 
       currentY += 4;
       doc.setDrawColor(203, 213, 225);
@@ -268,10 +409,10 @@ const Account = () => {
       currentY += 6;
       doc.setFontSize(12);
       doc.setTextColor(22, 163, 74);
-      doc.text(`Grand Total Paid:`, 130, currentY);
-      doc.text(`Rs. ${bill.grandTotal}`, 180, currentY, { align: 'right' });
+      doc.text('Grand Total Paid:', 130, currentY);
+      doc.text('Rs. ' + bill.grandTotal, 180, currentY, { align: 'right' });
 
-      doc.save(`HealthyBites_Invoice_${orderShortId}.pdf`);
+      doc.save('HealthyBites_Invoice_' + orderShortId + '.pdf');
     } catch (err) {
       alert('PDF Error: ' + err.message);
     }
@@ -279,7 +420,7 @@ const Account = () => {
 
   const handleReviewSubmit = async (e) => {
     e.preventDefault();
-    if (!selectedOrderForReview || !selectedOrderForReview.items?.[0]) return;
+    if (!selectedOrderForReview || !selectedOrderForReview.items || !selectedOrderForReview.items[0]) return;
     setIsSubmittingReview(true);
     try {
       const foodId = selectedOrderForReview.items[0].foodId || selectedOrderForReview.items[0]._id;
@@ -289,13 +430,13 @@ const Account = () => {
         rating: ratingVal,
         reviewText: reviewComment
       });
-      if (res.data?.success) {
+      if (res.data && res.data.success) {
         alert('⭐ Review submitted successfully!');
         setSelectedOrderForReview(null);
         setReviewComment('');
       }
     } catch (err) {
-      alert('Review error: ' + (err.response?.data?.message || err.message));
+      alert('Review error: ' + ((err.response && err.response.data && err.response.data.message) || err.message));
     } finally {
       setIsSubmittingReview(false);
     }
@@ -307,13 +448,13 @@ const Account = () => {
     setIsSavingMeal(true);
 
     try {
-      const res = await axios.put(`/api/extra/subscription/customize-meal/${customizingSub._id}`, {
+      const res = await axios.put('/api/extra/subscription/customize-meal/' + customizingSub._id, {
         selectedMeal: chosenMeal
       });
 
-      if (res.data?.success) {
+      if (res.data && res.data.success) {
         setSubscriptions(prev => prev.map(s => s._id === customizingSub._id ? res.data.subscription : s));
-        alert(`✅ Tomorrow's meal updated to: "${chosenMeal}"!`);
+        alert('✅ Tomorrow meal updated to: "' + chosenMeal + '"!');
         setCustomizingSub(null);
       }
     } catch (err) {
@@ -329,15 +470,20 @@ const Account = () => {
     const totalAmount = planDuration * rate;
 
     if (paymentMode === 'wallet' && walletBalance < totalAmount) {
-      alert(`⚠️ Insufficient Wallet Balance (₹${walletBalance}). Please Top-Up from Wallet tab or choose UPI.`);
+      alert('⚠️ Insufficient Wallet Balance (₹' + walletBalance + '). Please Top-Up or choose UPI.');
       return;
     }
 
     setIsProcessingPayment(true);
 
     const matchingDishes = menuFoods.filter(f => Number(f.price) <= selectedTier.maxDishPrice);
-    const defaultMeal = matchingDishes.length > 0 ? matchingDishes[0].title : `${selectedTier.name} (Chef Special)`;
-    const defaultAddr = addresses.find(a => a.isDefault)?.address || localStorage.getItem('user_delivery_hub')?.replace(/📍/g, '').trim() || 'Vijayawada';
+    const defaultMeal = matchingDishes.length > 0 ? matchingDishes[0].title : selectedTier.name + ' (Chef Special)';
+    const defaultAddr = (addresses.find(a => a.isDefault) || addresses[0]) ? (addresses.find(a => a.isDefault) || addresses[0]).address : '';
+
+    if (!defaultAddr) {
+      setIsProcessingPayment(false);
+      return alert('⚠️ Please add at least one Delivery Address in the "Saved Addresses" tab before subscribing.');
+    }
 
     try {
       const txnId = 'TXN_SUB_' + Math.floor(100000 + Math.random() * 900000);
@@ -345,38 +491,38 @@ const Account = () => {
       const res = await axios.post('/api/extra/subscription/create', {
         customerName: userName,
         customerEmail: userEmail,
-        planType: `${planDuration}-Day ${selectedTier.name}`,
+        planType: planDuration + '-Day ' + selectedTier.name,
         durationDays: planDuration,
         defaultDish: defaultMeal,
         transactionId: txnId,
-        paymentMethod: paymentMode === 'wallet' ? 'HealthyBites Wallet' : `Sandbox UPI (${upiId})`,
+        paymentMethod: paymentMode === 'wallet' ? 'HealthyBites Wallet' : 'Sandbox UPI (' + upiId + ')',
         paymentStatus: 'PAID',
-        items: [{ title: `${selectedTier.name} (₹${rate}/day)`, qty: planDuration, price: rate }],
+        items: [{ title: selectedTier.name + ' (₹' + rate + '/day)', qty: planDuration, price: rate }],
         totalAmount: totalAmount,
         deliveryTime: deliverySlot,
         deliveryAddress: defaultAddr
       });
 
-      if (res.data?.success) {
+      if (res.data && res.data.success) {
         if (paymentMode === 'wallet') {
           const newBal = walletBalance - totalAmount;
           setWalletBalance(newBal);
-          localStorage.setItem(`wallet_${userIdentifier}`, String(newBal));
+          localStorage.setItem('wallet_' + userIdentifier, String(newBal));
           const newTxn = {
             id: txnId,
-            desc: `Subscription: ${planDuration}-Day ${selectedTier.name}`,
+            desc: 'Subscription: ' + planDuration + '-Day ' + selectedTier.name,
             amount: totalAmount,
             type: 'DR',
             time: new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })
           };
           const updatedTxns = [newTxn, ...walletTxns];
           setWalletTxns(updatedTxns);
-          localStorage.setItem(`wallet_txns_${userIdentifier}`, JSON.stringify(updatedTxns));
+          localStorage.setItem('wallet_txns_' + userIdentifier, JSON.stringify(updatedTxns));
         }
 
         setSubscriptions([res.data.subscription, ...subscriptions]);
         setShowSubModal(false);
-        alert(`🎉 Subscription Activated for ₹${totalAmount} All-Inclusive!\nTxn Ref: ${txnId}`);
+        alert("🎉 Subscription Activated for ₹" + totalAmount + " All-Inclusive!\nTxn Ref: " + txnId);
         setActiveTab('subscriptions');
       }
     } catch (err) {
@@ -411,7 +557,7 @@ const Account = () => {
   };
 
   return (
-    <div style={{ maxWidth: '950px', margin: '0 auto', padding: '24px 16px' }}>
+    <div style={{ maxWidth: '950px', margin: '0 auto', padding: '24px 16px', fontFamily: 'sans-serif' }}>
 
       {/* Profile Header */}
       <div style={{
@@ -430,22 +576,29 @@ const Account = () => {
           </div>
           <div>
             <h3 style={{ margin: 0, fontSize: '20px' }}>{userName}</h3>
-            <span style={{ fontSize: '12px', color: '#94a3b8' }}>{userEmail} • {userPhone}</span>
+            <span style={{ fontSize: '12px', color: '#94a3b8' }}>
+              {userEmail} {userPhone ? '• ' + userPhone : ''}
+            </span>
           </div>
         </div>
 
-        <button onClick={logout} style={{ background: '#ef4444', color: '#fff', border: 'none', padding: '8px 18px', borderRadius: '8px', fontWeight: '700', cursor: 'pointer', fontSize: '12px' }}>
-          Logout
-        </button>
+        <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+          <button onClick={handleDeleteMyAccount} disabled={isDeletingAccount} style={{ background: 'rgba(239, 68, 68, 0.2)', color: '#fca5a5', border: '1px solid rgba(239, 68, 68, 0.4)', padding: '8px 12px', borderRadius: '8px', fontWeight: '700', cursor: 'pointer', fontSize: '11px' }}>
+            🗑️ Delete Account (30-Day Notice)
+          </button>
+          <button onClick={logout} style={{ background: '#ef4444', color: '#fff', border: 'none', padding: '8px 18px', borderRadius: '8px', fontWeight: '700', cursor: 'pointer', fontSize: '12px' }}>
+            Logout
+          </button>
+        </div>
       </div>
 
       {/* Tabs */}
       <div style={{ display: 'flex', gap: '8px', borderBottom: '1px solid #e2e8f0', paddingBottom: '12px', marginBottom: '20px', flexWrap: 'wrap' }}>
         {[
-          { id: 'orders', label: `📦 Orders (${orders.length})` },
-          { id: 'subscriptions', label: `🥗 Meal Subscriptions (${subscriptions.length})` },
-          { id: 'wallet', label: `💰 Wallet (₹${walletBalance})` },
-          { id: 'addresses', label: `📍 Saved Addresses (${addresses.length})` }
+          { id: 'orders', label: '📦 Orders (' + orders.length + ')' },
+          { id: 'subscriptions', label: '🥗 Meal Subscriptions (' + subscriptions.length + ')' },
+          { id: 'wallet', label: '💰 Wallet (₹' + walletBalance + ')' },
+          { id: 'addresses', label: '📍 Saved Addresses (' + addresses.length + ')' }
         ].map(tab => (
           <button
             key={tab.id}
@@ -473,7 +626,7 @@ const Account = () => {
             <div style={{ textAlign: 'center', padding: '50px 20px', background: '#fff', borderRadius: '14px', border: '1px dashed #cbd5e1', color: '#64748b' }}>
               <span style={{ fontSize: '40px', display: 'block', marginBottom: '8px' }}>🛍️</span>
               <h4 style={{ margin: '0 0 4px 0', color: '#0f172a' }}>No regular on-demand food orders</h4>
-              <p style={{ margin: 0, fontSize: '12px' }}>Your active recurring subscriptions are in the "Meal Subscriptions" tab.</p>
+              <p style={{ margin: 0, fontSize: '12px' }}>Explore delicious healthy dishes or subscribe to recurring meal plans!</p>
             </div>
           ) : (
             orders.map((o) => {
@@ -486,8 +639,11 @@ const Account = () => {
                 <div key={o._id} style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: '14px', padding: '18px', boxShadow: '0 2px 8px rgba(0,0,0,0.02)' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', borderBottom: '1px solid #f1f5f9', paddingBottom: '10px' }}>
                     <div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                         <strong style={{ fontSize: '16px', color: '#0f172a' }}>Order #{(o._id || '').slice(-6).toUpperCase()}</strong>
+                        <span style={{ fontSize: '11px', background: '#ecfdf5', color: '#15803d', border: '1px solid #86efac', padding: '2px 8px', borderRadius: '6px', fontWeight: '800', fontFamily: 'monospace' }}>
+                          🔑 OTP: {o.deliveryOtp || (userPhone ? userPhone.slice(-4) : '5895')}
+                        </span>
                         <span style={{ fontSize: '11px', background: '#f1f5f9', color: '#475569', padding: '2px 6px', borderRadius: '4px', fontFamily: 'monospace' }}>ID: {o._id}</span>
                       </div>
                       <span style={{ display: 'block', fontSize: '12px', color: '#64748b', marginTop: '2px' }}>
@@ -496,14 +652,14 @@ const Account = () => {
                     </div>
                     <div style={{ textAlign: 'right' }}>
                       <span style={{ fontSize: '18px', fontWeight: '800', color: '#16a34a' }}>₹{bill.grandTotal}</span>
-                      <span style={{ display: 'inline-block', fontSize: '11px', background: badge.bg, color: badge.text, border: `1px solid ${badge.border}`, padding: '3px 10px', borderRadius: '12px', fontWeight: '800', marginTop: '2px' }}>
+                      <span style={{ display: 'inline-block', fontSize: '11px', background: badge.bg, color: badge.text, border: '1px solid ' + badge.border, padding: '3px 10px', borderRadius: '12px', fontWeight: '800', marginTop: '2px' }}>
                         ● {o.orderStatus || 'Order Placed'}
                       </span>
                     </div>
                   </div>
 
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginBottom: '12px' }}>
-                    {o.items?.map((item, idx) => (
+                    {o.items && o.items.map((item, idx) => (
                       <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px', color: '#334155' }}>
                         <span>🥗 <strong>{item.title}</strong> (x{item.qty})</span>
                         <span style={{ fontWeight: '700' }}>₹{item.price * item.qty}</span>
@@ -523,7 +679,7 @@ const Account = () => {
                     </div>
                     <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
                       <span>Delivery Fee ({bill.subtotal < 199 ? '< ₹199' : 'Free above ₹199'}):</span>
-                      <span style={{ color: bill.deliveryFee === 0 ? '#16a34a' : '#475569', fontWeight: '700' }}>{bill.deliveryFee === 0 ? 'FREE' : `₹${bill.deliveryFee}`}</span>
+                      <span style={{ color: bill.deliveryFee === 0 ? '#16a34a' : '#475569', fontWeight: '700' }}>{bill.deliveryFee === 0 ? 'FREE' : '₹' + bill.deliveryFee}</span>
                     </div>
                     <div style={{ borderTop: '1px dashed #cbd5e1', paddingTop: '4px', display: 'flex', justifyContent: 'space-between', fontWeight: '800', color: '#0f172a' }}>
                       <span>Total Paid:</span><span style={{ color: '#16a34a' }}>₹{bill.grandTotal}</span>
@@ -534,8 +690,12 @@ const Account = () => {
                     <button onClick={() => downloadInvoicePDF(o)} style={{ flex: 1, background: '#0f172a', color: '#ffffff', border: 'none', padding: '10px 14px', borderRadius: '8px', fontWeight: '700', fontSize: '12px', cursor: 'pointer' }}>
                       📄 Download Tax Invoice (PDF)
                     </button>
+                    <a href={'/track/' + o._id} style={{ background: '#16a34a', color: '#ffffff', textDecoration: 'none', padding: '10px 14px', borderRadius: '8px', fontWeight: '700', fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>🛵 Track Live</a>
                     <button onClick={() => setSelectedOrderForReview(o)} style={{ background: '#fef3c7', color: '#92400e', border: '1px solid #fde68a', padding: '10px 14px', borderRadius: '8px', fontWeight: '700', fontSize: '12px', cursor: 'pointer' }}>
-                      ⭐ Rate & Review
+                      ⭐ Rate Meal
+                    </button>
+                    <button onClick={() => setSelectedOrderForRider(o)} style={{ background: '#e0f2fe', color: '#0369a1', border: '1px solid #bae6fd', padding: '10px 14px', borderRadius: '8px', fontWeight: '700', fontSize: '12px', cursor: 'pointer' }}>
+                      🛵 Rate Delivery
                     </button>
                   </div>
                 </div>
@@ -641,7 +801,7 @@ const Account = () => {
           </div>
 
           <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '14px', padding: '18px' }}>
-            <h4 style={{ margin: '0 0 10px 0', fontSize: '15px', color: '#0f172a' }}>⚡ Instant Sandbox Wallet Top-Up</h4>
+            <h4 style={{ margin: '0 0 10px 0', fontSize: '15px', color: '#0f172a' }}>⚡ Instant Wallet Top-Up</h4>
             <div style={{ display: 'flex', gap: '10px' }}>
               <input
                 type="number"
@@ -662,17 +822,21 @@ const Account = () => {
           <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '14px', padding: '18px' }}>
             <h4 style={{ margin: '0 0 12px 0', fontSize: '15px', color: '#0f172a' }}>📑 Wallet Passbook History</h4>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              {walletTxns.map((t, idx) => (
-                <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 12px', background: '#f8fafc', borderRadius: '8px', border: '1px solid #f1f5f9' }}>
-                  <div>
-                    <strong style={{ fontSize: '13px', color: '#0f172a', display: 'block' }}>{t.desc}</strong>
-                    <span style={{ fontSize: '11px', color: '#64748b' }}>Ref: #{t.id} • {t.time}</span>
+              {walletTxns.length === 0 ? (
+                <div style={{ color: '#64748b', fontSize: '12px', padding: '10px 0' }}>No wallet transactions yet.</div>
+              ) : (
+                walletTxns.map((t, idx) => (
+                  <div key={idx} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 12px', background: '#f8fafc', borderRadius: '8px', border: '1px solid #f1f5f9' }}>
+                    <div>
+                      <strong style={{ fontSize: '13px', color: '#0f172a', display: 'block' }}>{t.desc}</strong>
+                      <span style={{ fontSize: '11px', color: '#64748b' }}>Ref: #{t.id} • {t.time}</span>
+                    </div>
+                    <strong style={{ fontSize: '14px', color: t.type === 'CR' ? '#16a34a' : '#dc2626' }}>
+                      {t.type === 'CR' ? '+ ' : '- '}₹{t.amount}
+                    </strong>
                   </div>
-                  <strong style={{ fontSize: '14px', color: t.type === 'CR' ? '#16a34a' : '#dc2626' }}>
-                    {t.type === 'CR' ? '+ ' : '- '}₹{t.amount}
-                  </strong>
-                </div>
-              ))}
+                ))
+              )}
             </div>
           </div>
         </div>
@@ -684,10 +848,10 @@ const Account = () => {
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <div>
               <h4 style={{ margin: 0, fontSize: '16px', color: '#0f172a' }}>📍 Your Delivery Addresses</h4>
-              <span style={{ fontSize: '12px', color: '#64748b' }}>Manage your home, office and other delivery hubs</span>
+              <span style={{ fontSize: '12px', color: '#64748b' }}>Manage your personal home, work, and other delivery points</span>
             </div>
             <button
-              onClick={() => setShowAddAddress(!showAddAddress)}
+              onClick={() => { setShowAddAddress(!showAddAddress); setShowMapPicker(false); }}
               style={{ background: '#16a34a', color: '#fff', border: 'none', padding: '8px 16px', borderRadius: '8px', fontWeight: '800', fontSize: '12px', cursor: 'pointer' }}
             >
               {showAddAddress ? '✕ Cancel' : '➕ Add New Address'}
@@ -696,7 +860,40 @@ const Account = () => {
 
           {showAddAddress && (
             <form onSubmit={handleSaveNewAddress} style={{ background: '#ffffff', border: '2px solid #16a34a', borderRadius: '14px', padding: '20px', boxShadow: '0 4px 15px rgba(22, 163, 74, 0.1)' }}>
-              <h4 style={{ margin: '0 0 14px 0', fontSize: '15px', color: '#0f172a' }}>🏠 Save New Delivery Address</h4>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px', flexWrap: 'wrap', gap: '8px' }}>
+                <h4 style={{ margin: 0, fontSize: '15px', color: '#0f172a' }}>🏠 Save New Delivery Address</h4>
+                <button
+                  type="button"
+                  onClick={() => setShowMapPicker(!showMapPicker)}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    background: showMapPicker ? '#0f172a' : '#ecfdf5',
+                    color: showMapPicker ? '#ffffff' : '#15803d',
+                    border: showMapPicker ? '1px solid #0f172a' : '1px solid #86efac',
+                    padding: '6px 14px',
+                    borderRadius: '20px',
+                    fontSize: '11px',
+                    fontWeight: '800',
+                    cursor: 'pointer'
+                  }}
+                >
+                  <span>🗺️</span>
+                  <span>{showMapPicker ? '✕ Hide Map' : '📍 Pick & Auto-Detect on Map'}</span>
+                </button>
+              </div>
+
+              {/* DYNAMIC LEAFLET MAP PICKER */}
+              {showMapPicker && (
+                <div style={{ marginBottom: '16px', borderRadius: '12px', overflow: 'hidden', border: '2px solid #10b981' }}>
+                  <div style={{ background: '#0f172a', color: '#86efac', padding: '8px 12px', fontSize: '11px', fontWeight: '700', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span>📍 Click anywhere on map or drag pin to auto-fill address</span>
+                    {mapAddressLoading && <span style={{ color: '#fbbf24' }}>⏳ Auto-detecting locality...</span>}
+                  </div>
+                  <div ref={mapContainerRef} style={{ width: '100%', height: '260px' }} />
+                </div>
+              )}
 
               <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
                 {['Home', 'Work', 'Other'].map(type => (
@@ -720,21 +917,52 @@ const Account = () => {
                 ))}
               </div>
 
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '10px' }}>
+              {/* Compact 2-Column Grid: Recipient Phone + Flat Number */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: '10px', marginBottom: '10px' }}>
+                <div>
+                  <label htmlFor="addr-phone" style={{ display: 'block', fontSize: '11px', fontWeight: '700', color: '#475569', marginBottom: '4px' }}>
+                    RECIPIENT CONTACT NUMBER (10 DIGITS) *
+                  </label>
+                  <input
+                    id="addr-phone"
+                    name="recipientPhone"
+                    type="tel"
+                    maxLength="10"
+                    placeholder="10-digit mobile number"
+                    value={newAddr.recipientPhone || ''}
+                    onChange={e => setNewAddr({ ...newAddr, recipientPhone: e.target.value.replace(/\D/g, '').slice(0, 10) })}
+                    style={{ width: '100%', padding: '8px 10px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '12px', boxSizing: 'border-box' }}
+                    required
+                  />
+                </div>
+                <div>
+                  <label htmlFor="addr-flat" style={{ display: 'block', fontSize: '11px', fontWeight: '700', color: '#475569', marginBottom: '4px' }}>
+                    FLAT / HOUSE NO.
+                  </label>
+                  <input
+                    id="addr-flat"
+                    name="flat"
+                    type="text"
+                    placeholder="House / Flat / Block No."
+                    value={newAddr.flat}
+                    onChange={e => setNewAddr({ ...newAddr, flat: e.target.value })}
+                    style={{ width: '100%', padding: '8px 10px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '12px', boxSizing: 'border-box' }}
+                  />
+                </div>
+              </div>
+
+              <div style={{ marginBottom: '10px' }}>
+                <label htmlFor="addr-street" style={{ display: 'block', fontSize: '11px', fontWeight: '700', color: '#475569', marginBottom: '4px' }}>
+                  STREET / ROAD / SOCIETY *
+                </label>
                 <input
-                  type="text"
-                  placeholder="House / Flat / Block No."
-                  value={newAddr.flat}
-                  onChange={e => setNewAddr({ ...newAddr, flat: e.target.value })}
-                  style={{ padding: '8px 10px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '12px' }}
-                  required
-                />
-                <input
+                  id="addr-street"
+                  name="street"
                   type="text"
                   placeholder="Street / Road / Society *"
                   value={newAddr.street}
                   onChange={e => setNewAddr({ ...newAddr, street: e.target.value })}
-                  style={{ padding: '8px 10px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '12px' }}
+                  style={{ width: '100%', padding: '8px 10px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '12px', boxSizing: 'border-box' }}
                   required
                 />
               </div>
@@ -742,7 +970,7 @@ const Account = () => {
               <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr 1fr', gap: '10px', marginBottom: '14px' }}>
                 <input
                   type="text"
-                  placeholder="Area / Locality (e.g. Benz Circle) *"
+                  placeholder="Area / Locality *"
                   value={newAddr.area}
                   onChange={e => setNewAddr({ ...newAddr, area: e.target.value })}
                   style={{ padding: '8px 10px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '12px' }}
@@ -759,11 +987,10 @@ const Account = () => {
                 <input
                   type="text"
                   maxLength="6"
-                  placeholder="PIN Code *"
+                  placeholder="PIN Code"
                   value={newAddr.pin}
                   onChange={e => setNewAddr({ ...newAddr, pin: e.target.value })}
                   style={{ padding: '8px 10px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '12px' }}
-                  required
                 />
               </div>
 
@@ -777,40 +1004,46 @@ const Account = () => {
           )}
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-            {addresses.map((a) => (
-              <div key={a.id} style={{ background: '#ffffff', border: a.isDefault ? '2px solid #16a34a' : '1px solid #e2e8f0', borderRadius: '12px', padding: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
-                    <span style={{ fontSize: '12px', fontWeight: '800', background: '#f1f5f9', padding: '2px 8px', borderRadius: '4px' }}>
-                      {a.type === 'Home' ? '🏡 HOME' : a.type === 'Work' ? '💼 WORK' : '📍 OTHER'}
-                    </span>
-                    {a.isDefault && (
-                      <span style={{ fontSize: '11px', color: '#16a34a', fontWeight: '800' }}>✓ ACTIVE DEFAULT</span>
-                    )}
-                  </div>
-                  <p style={{ margin: '0', fontSize: '13px', color: '#334155', lineHeight: '1.4' }}>{a.address}</p>
-                </div>
-
-                <div style={{ display: 'flex', gap: '8px' }}>
-                  {!a.isDefault && (
-                    <button
-                      onClick={() => handleSetDefaultAddress(a)}
-                      style={{ background: '#ecfdf5', color: '#16a34a', border: '1px solid #86efac', padding: '6px 10px', borderRadius: '6px', fontSize: '11px', fontWeight: '700', cursor: 'pointer' }}
-                    >
-                      Set Default
-                    </button>
-                  )}
-                  <button
-                    onClick={() => handleDeleteAddress(a.id)}
-                    style={{ background: '#fee2e2', color: '#dc2626', border: 'none', padding: '6px 10px', borderRadius: '6px', fontSize: '11px', fontWeight: '700', cursor: 'pointer' }}
-                  >
-                    🗑️
-                  </button>
-                </div>
+            {addresses.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: '40px', background: '#fff', borderRadius: '12px', color: '#64748b' }}>
+                No delivery addresses saved yet. Click "+ Add New Address" above.
               </div>
-            ))}
-          </div>
+            ) : (
+              addresses.map((a) => (
+                <div key={a.id} style={{ background: '#ffffff', border: a.isDefault ? '2px solid #16a34a' : '1px solid #e2e8f0', borderRadius: '12px', padding: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                      <span style={{ fontSize: '12px', fontWeight: '800', background: '#f1f5f9', padding: '2px 8px', borderRadius: '4px' }}>
+                        {a.type === 'Home' ? '🏡 HOME' : a.type === 'Work' ? '💼 WORK' : '📍 OTHER'}
+                      </span>
+                      {a.isDefault && (
+                        <span style={{ fontSize: '11px', color: '#16a34a', fontWeight: '800' }}>✓ ACTIVE DEFAULT</span>
+                      )}
+                    </div>
+                    <p style={{ margin: '0', fontSize: '13px', color: '#334155', lineHeight: '1.4' }}>{a.address}</p>
+                    <span style={{ fontSize: '12px', color: '#16a34a', fontWeight: '700', display: 'block', marginTop: '4px' }}>📞 Recipient: {a.recipientPhone || userPhone || 'Not Set'}</span>
+                  </div>
 
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    {!a.isDefault && (
+                      <button
+                        onClick={() => handleSetDefaultAddress(a)}
+                        style={{ background: '#ecfdf5', color: '#16a34a', border: '1px solid #86efac', padding: '6px 10px', borderRadius: '6px', fontSize: '11px', fontWeight: '700', cursor: 'pointer' }}
+                      >
+                        Set Default
+                      </button>
+                    )}
+                    <button
+                      onClick={() => handleDeleteAddress(a.id)}
+                      style={{ background: '#fee2e2', color: '#dc2626', border: 'none', padding: '6px 10px', borderRadius: '6px', fontSize: '11px', fontWeight: '700', cursor: 'pointer' }}
+                    >
+                      🗑️
+                    </button>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
         </div>
       )}
 
@@ -826,7 +1059,6 @@ const Account = () => {
               <button type="button" onClick={() => setShowSubModal(false)} style={{ background: '#f1f5f9', border: 'none', borderRadius: '50%', width: '28px', height: '28px', cursor: 'pointer', fontWeight: 'bold' }}>✕</button>
             </div>
 
-            {/* Select Meal Tier */}
             <div style={{ marginBottom: '14px' }}>
               <label style={{ display: 'block', fontSize: '12px', fontWeight: '700', color: '#334155', marginBottom: '6px' }}>1. Select Meal Tier:</label>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
@@ -845,7 +1077,6 @@ const Account = () => {
               </div>
             </div>
 
-            {/* Select Plan Duration */}
             <div style={{ marginBottom: '14px' }}>
               <label style={{ display: 'block', fontSize: '12px', fontWeight: '700', color: '#334155', marginBottom: '6px' }}>2. Select Plan Duration:</label>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px' }}>
@@ -872,7 +1103,6 @@ const Account = () => {
               </div>
             </div>
 
-            {/* Preferred Delivery Slot */}
             <div style={{ marginBottom: '14px' }}>
               <label style={{ display: 'block', fontSize: '12px', fontWeight: '700', color: '#334155', marginBottom: '4px' }}>3. Preferred Delivery Slot:</label>
               <select value={deliverySlot} onChange={e => setDeliverySlot(e.target.value)} style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #cbd5e1', fontSize: '12px' }}>
@@ -881,7 +1111,6 @@ const Account = () => {
               </select>
             </div>
 
-            {/* Payment Method */}
             <div style={{ marginBottom: '16px' }}>
               <label style={{ display: 'block', fontSize: '12px', fontWeight: '700', color: '#334155', marginBottom: '6px' }}>4. Payment Mode:</label>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
@@ -916,7 +1145,7 @@ const Account = () => {
                 cursor: isProcessingPayment ? 'not-allowed' : 'pointer'
               }}
             >
-              {isProcessingPayment ? 'Activating Subscription...' : `Pay ₹${planDuration * selectedTier.ratePerDay} & Activate Plan`}
+              {isProcessingPayment ? 'Activating Subscription...' : 'Pay ₹' + (planDuration * selectedTier.ratePerDay) + ' & Activate Plan'}
             </button>
           </form>
         </div>
@@ -1023,6 +1252,51 @@ const Account = () => {
               <button type="button" onClick={() => setSelectedOrderForReview(null)} style={{ flex: 1, background: '#f1f5f9', border: 'none', padding: '10px', borderRadius: '8px', fontWeight: '700', cursor: 'pointer' }}>Cancel</button>
               <button type="submit" disabled={isSubmittingReview} style={{ flex: 1, background: '#16a34a', color: '#fff', border: 'none', padding: '10px', borderRadius: '8px', fontWeight: '800', cursor: 'pointer' }}>
                 {isSubmittingReview ? 'Posting...' : 'Submit Review'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+
+      {/* Rider Feedback Modal */}
+      {selectedOrderForRider && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(3px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 99999, padding: '14px' }}>
+          <form onSubmit={handleRiderReviewSubmit} style={{ background: '#fff', borderRadius: '16px', padding: '24px', width: '100%', maxWidth: '420px', boxShadow: '0 20px 40px rgba(0,0,0,0.2)' }}>
+            <h3 style={{ margin: '0 0 6px 0', fontSize: '18px', color: '#0f172a' }}>🛵 Rate Delivery Partner</h3>
+            <p style={{ margin: '0 0 16px 0', fontSize: '12px', color: '#64748b' }}>
+              How was your delivery experience with <strong>{selectedOrderForRider.assignedRiderName || 'Verified Partner'}</strong>?
+            </p>
+
+            <div style={{ marginBottom: '16px', display: 'flex', gap: '8px', justifyContent: 'center' }}>
+              {[1, 2, 3, 4, 5].map((star) => (
+                <button
+                  type="button"
+                  key={star}
+                  onClick={() => setRiderRatingVal(star)}
+                  style={{ background: 'none', border: 'none', fontSize: '28px', cursor: 'pointer', color: star <= riderRatingVal ? '#f59e0b' : '#cbd5e1' }}
+                >
+                  ★
+                </button>
+              ))}
+            </div>
+
+            <div style={{ marginBottom: '16px' }}>
+              <label style={{ display: 'block', fontSize: '12px', fontWeight: '700', color: '#334155', marginBottom: '4px' }}>Feedback for Rider</label>
+              <textarea
+                placeholder="Polite, fast delivery, handled food with care..."
+                value={riderComment}
+                onChange={(e) => setRiderComment(e.target.value)}
+                style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #cbd5e1', fontSize: '13px', boxSizing: 'border-box' }}
+                rows="3"
+                required
+              />
+            </div>
+
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <button type="button" onClick={() => setSelectedOrderForRider(null)} style={{ flex: 1, background: '#f1f5f9', border: 'none', padding: '10px', borderRadius: '8px', fontWeight: '700', cursor: 'pointer' }}>Cancel</button>
+              <button type="submit" disabled={isSubmittingReview} style={{ flex: 1, background: '#0284c7', color: '#fff', border: 'none', padding: '10px', borderRadius: '8px', fontWeight: '800', cursor: 'pointer' }}>
+                {isSubmittingReview ? 'Submitting...' : 'Submit Rating'}
               </button>
             </div>
           </form>

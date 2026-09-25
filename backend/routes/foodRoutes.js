@@ -60,10 +60,15 @@ router.post('/add', async (req, res) => {
     let finalImageUrl = imageUrl || '';
 
     if (imageUrl && imageUrl.startsWith('data:image')) {
-      const uploadRes = await cloudinary.uploader.upload(imageUrl, {
-        folder: 'healthybites_dishes'
-      });
-      finalImageUrl = uploadRes.secure_url;
+      try {
+        const uploadRes = await cloudinary.uploader.upload(imageUrl, {
+          folder: 'healthybites_dishes'
+        });
+        finalImageUrl = uploadRes.secure_url;
+      } catch (cErr) {
+        console.warn("Cloudinary upload failed, using fallback:", cErr.message);
+        finalImageUrl = 'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=500';
+      }
     }
 
     const newFood = new Food({
@@ -72,8 +77,8 @@ router.post('/add', async (req, res) => {
       price: Number(price),
       protein: protein || 'High Protein',
       imageUrl: finalImageUrl,
-      sellerId: sellerId || 'tests',
-      sellerName: sellerName || 'Kitchen Partner',
+      sellerId: String(sellerId || ''),
+      sellerName: String(sellerName || ''),
       branchName: branchName?.trim() || 'Main Branch',
       areaName: areaName?.trim() || 'Local Area',
       city: city?.trim() || 'Vijayawada',

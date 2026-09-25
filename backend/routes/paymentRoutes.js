@@ -35,9 +35,28 @@ router.post(['/sandbox-pay', '/create-order', '/order', '/checkout', '/place'], 
     const calculatedSubtotal = (items || []).reduce((sum, i) => sum + (Number(i.price || 0) * Number(i.qty || 1)), 0);
     const grossFoodAmount = Number(itemTotal || calculatedSubtotal || 0);
 
+    const User = require('../models/User');
+    const userRecord = await User.findOne({
+      $or: [
+        { _id: mongoose.isValidObjectId(userId) ? userId : null },
+        { username: customerName },
+        { username: userId }
+      ]
+    });
+
+    const phoneFromDb = userRecord?.phone || req.body.customerPhone || req.body.phone;
+    const cleanPhone = String(phoneFromDb || '').replace(/\D/g, '');
+    const constantDeliveryOtp = cleanPhone.length >= 4 ? cleanPhone.slice(-4) : '0000';
+
+    const rawPhone = String(req.body.customerPhone || req.body.phone || '8074095895').replace(/\D/g, '');
+    const phoneBasedOtp = rawPhone.length >= 4 ? rawPhone.slice(-4) : '1234';
+
     const newOrder = {
+      deliveryOtp: phoneBasedOtp,
       userId: userId || 'user_1',
-      customerName: customerName || 'Customer',
+      customerName: customerName || userRecord?.username || 'Customer',
+      customerPhone: phoneFromDb,
+      deliveryOtp: constantDeliveryOtp,
       sellerId: sellerId,
       items: (items || []).map(it => ({
         foodId: it.foodId || it._id,
@@ -55,6 +74,7 @@ router.post(['/sandbox-pay', '/create-order', '/order', '/checkout', '/place'], 
       paymentType: paymentType || 'Sandbox (UPI)',
       paymentStatus: 'PAID',
       orderStatus: 'Order Placed',
+      // OTP locked to customer phone
       createdAt: new Date()
     };
 

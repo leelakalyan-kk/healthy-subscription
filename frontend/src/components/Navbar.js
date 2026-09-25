@@ -7,8 +7,6 @@ const Navbar = ({
   setSearchQuery,
   cartCount = 0,
   setIsCartOpen,
-  currentLocation,
-  setIsLocationModalOpen,
   wishlistCount = 0,
   setIsWishlistOpen
 }) => {
@@ -30,55 +28,24 @@ const Navbar = ({
       <div style={{
         maxWidth: '1200px',
         margin: '0 auto',
-        padding: '10px 12px',
+        padding: '10px 14px',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'space-between',
-        gap: '8px',
+        flexWrap: 'wrap',
+        gap: '10px',
         boxSizing: 'border-box'
       }}>
-        
         {/* Brand Logo */}
         <Link to="/" style={{ textDecoration: 'none', display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
-          <span style={{ fontSize: '20px' }}>🌱</span>
-          <span style={{ fontSize: '16px', fontWeight: '800', color: '#16a34a', letterSpacing: '-0.5px' }}>
+          <span style={{ fontSize: '22px' }}>🌱</span>
+          <span style={{ fontSize: '18px', fontWeight: '800', color: '#16a34a', letterSpacing: '-0.5px' }}>
             HealthyBites
           </span>
         </Link>
 
-        {/* Location Selector */}
-        <button
-          type="button"
-          onClick={() => setIsLocationModalOpen(true)}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '4px',
-            background: '#f1f5f9',
-            border: '1px solid #cbd5e1',
-            borderRadius: '20px',
-            padding: '6px 10px',
-            fontSize: '11px',
-            fontWeight: '600',
-            color: '#334155',
-            cursor: 'pointer',
-            maxWidth: '160px',
-            overflow: 'hidden',
-            whiteSpace: 'nowrap',
-            textOverflow: 'ellipsis',
-            flexShrink: 1
-          }}
-          title={currentLocation}
-        >
-          <span>📍</span>
-          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {currentLocation.replace(/📍/g, '').trim()}
-          </span>
-        </button>
-
         {/* Right Actions */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
-          
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 }}>
           {/* Wishlist Button */}
           <button
             type="button"
@@ -94,6 +61,7 @@ const Navbar = ({
               padding: '4px'
             }}
             title="Open Wishlist"
+            aria-label="Wishlist"
           >
             <span>💚</span>
             {wishlistCount > 0 && (
@@ -124,16 +92,17 @@ const Navbar = ({
             style={{
               display: 'flex',
               alignItems: 'center',
-              gap: '4px',
+              gap: '6px',
               background: '#ecfdf5',
               border: '1px solid #86efac',
               borderRadius: '20px',
-              padding: '6px 10px',
+              padding: '6px 12px',
               fontSize: '12px',
               fontWeight: '700',
               color: '#15803d',
               cursor: 'pointer'
             }}
+            aria-label="Cart"
           >
             <span>🛒</span>
             <span>{cartCount}</span>
@@ -148,14 +117,15 @@ const Navbar = ({
                 background: '#f8fafc',
                 border: '1px solid #cbd5e1',
                 borderRadius: '50%',
-                width: '32px',
-                height: '32px',
+                width: '34px',
+                height: '34px',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
                 cursor: 'pointer',
-                fontSize: '14px'
+                fontSize: '15px'
               }}
+              aria-label="User Account Menu"
             >
               👤
             </button>
@@ -163,7 +133,7 @@ const Navbar = ({
             {showProfileMenu && (
               <div style={{
                 position: 'absolute',
-                top: '40px',
+                top: '42px',
                 right: 0,
                 background: '#ffffff',
                 border: '1px solid #e2e8f0',
@@ -201,28 +171,34 @@ const Navbar = ({
               </div>
             )}
           </div>
-
         </div>
-      </div>
 
-      {/* Search Bar */}
-      <div style={{ padding: '0 12px 10px 12px', maxWidth: '1200px', margin: '0 auto', boxSizing: 'border-box' }}>
-        <input
-          type="text"
-          placeholder="🔍 Search dishes, ingredients, kitchens..."
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-          style={{
-            width: '100%',
-            padding: '8px 14px',
-            borderRadius: '10px',
-            border: '1px solid #cbd5e1',
-            fontSize: '13px',
-            outline: 'none',
-            boxSizing: 'border-box',
-            background: '#f8fafc'
-          }}
-        />
+        {/* Responsive Full-Width Search Input on Mobile 320px with proper id and name */}
+        <div style={{ width: '100%', display: 'flex', justifyContent: 'center', order: 3 }}>
+          <label htmlFor="navbar-search-input" style={{ position: 'absolute', width: '1px', height: '1px', padding: 0, margin: '-1px', overflow: 'hidden', clip: 'rect(0,0,0,0)', border: 0 }}>
+            Search dishes, ingredients, kitchens
+          </label>
+          <input
+            id="navbar-search-input"
+            name="searchQuery"
+            autoComplete="off"
+            type="text"
+            placeholder="🔍 Search dishes, ingredients, kitchens..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            style={{
+              width: '100%',
+              padding: '9px 16px',
+              borderRadius: '20px',
+              border: '1px solid #cbd5e1',
+              fontSize: '13px',
+              outline: 'none',
+              boxSizing: 'border-box',
+              background: '#f8fafc',
+              boxShadow: '0 1px 2px rgba(0,0,0,0.02)'
+            }}
+          />
+        </div>
       </div>
     </nav>
   );

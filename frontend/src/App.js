@@ -4,11 +4,47 @@ import { AuthContext } from './context/AuthContext';
 import Navbar from './components/Navbar';
 import CartDrawer from './components/CartDrawer';
 import WishlistDrawer from './components/WishlistDrawer';
-import LocationModal from './components/LocationModal';
 import CustomerHome from './pages/Customer/CustomerHome';
 import SellerHome from './pages/Seller/SellerHome';
+import AdminDashboard from './pages/Admin/AdminDashboard';
+import AdminLogin from './pages/Auth/AdminLogin';
+import HelpdeskLogin from './pages/Auth/HelpdeskLogin';
 import Account from './pages/Customer/Account';
+import CustomerTrack from './pages/Customer/CustomerTrack';
 import Auth from './pages/Auth/Auth';
+import FloatingChatbot from './components/FloatingChatbot';
+
+// Strict Protected Route Component for Admin & Helpdesk
+const ProtectedAdminRoute = ({ children }) => {
+  const { currentUser } = useContext(AuthContext);
+  const storedUser = JSON.parse(localStorage.getItem('active_user') || 'null');
+  const token = localStorage.getItem('token') || localStorage.getItem('auth_token');
+
+  const user = currentUser || storedUser;
+  const isAuthorized = token && user && (user.role === 'admin' || user.role === 'helpdesk');
+
+  if (!isAuthorized) {
+    return <Navigate to="/admin-login" replace />;
+  }
+
+  return children;
+};
+
+// Strict Protected Route for Kitchen Seller
+const ProtectedSellerRoute = ({ children }) => {
+  const { currentUser } = useContext(AuthContext);
+  const storedUser = JSON.parse(localStorage.getItem('active_user') || 'null');
+  const token = localStorage.getItem('token') || localStorage.getItem('auth_token');
+
+  const user = currentUser || storedUser;
+  const isSeller = token && user && (user.role === 'seller' || user.username === 'tests');
+
+  if (!isSeller) {
+    return <Navigate to="/login" replace />;
+  }
+
+  return children;
+};
 
 function App() {
   const { currentUser } = useContext(AuthContext);
@@ -18,18 +54,14 @@ function App() {
   const [wishlist, setWishlist] = useState(() => JSON.parse(localStorage.getItem('user_wishlist') || '[]'));
   const [isCartOpen, setIsCartOpen] = useState(false);
   const [isWishlistOpen, setIsWishlistOpen] = useState(false);
-  const [isLocationModalOpen, setIsLocationModalOpen] = useState(false);
-
+  
   const [currentLocation, setCurrentLocation] = useState(() => {
     return localStorage.getItem('user_delivery_hub') || '📍 Select Delivery Location';
   });
 
-  // Listen to instant location change event anywhere across the app
   useEffect(() => {
     const handleLocChange = (e) => {
-      if (e.detail) {
-        setCurrentLocation(e.detail);
-      }
+      if (e.detail) setCurrentLocation(e.detail);
     };
     window.addEventListener('location_changed', handleLocChange);
     return () => window.removeEventListener('location_changed', handleLocChange);
@@ -46,9 +78,7 @@ function App() {
   const addToCart = (food) => {
     setCart(prev => {
       const exists = prev.find(item => item._id === food._id);
-      if (exists) {
-        return prev.map(item => item._id === food._id ? { ...item, qty: item.qty + 1 } : item);
-      }
+      if (exists) return prev.map(item => item._id === food._id ? { ...item, qty: item.qty + 1 } : item);
       return [...prev, { ...food, qty: 1 }];
     });
   };
@@ -70,27 +100,29 @@ function App() {
   const toggleWishlist = (food) => {
     setWishlist(prev => {
       const exists = prev.some(item => item._id === food._id);
-      if (exists) {
-        return prev.filter(item => item._id !== food._id);
-      }
+      if (exists) return prev.filter(item => item._id !== food._id);
       return [...prev, food];
     });
   };
 
-  const isSeller = currentUser?.role === 'seller' || currentUser?.username === 'tests';
+  const activeUser = currentUser || JSON.parse(localStorage.getItem('active_user') || 'null');
+  const token = localStorage.getItem('token') || localStorage.getItem('auth_token');
+  const isSeller = token && activeUser && (activeUser.role === 'seller' || activeUser.username === 'tests');
+  const isAdminOrStaff = token && activeUser && (activeUser.role === 'admin' || activeUser.role === 'helpdesk');
+
   const cartCount = cart.reduce((sum, item) => sum + item.qty, 0);
 
   return (
-    <div style={{ minHeight: '100vh', background: '#f8fafc', display: 'flex', flexDirection: 'column' }}>
+    <div style={{ minHeight: '100vh', background: isAdminOrStaff ? '#0b0e11' : '#f8fafc', display: 'flex', flexDirection: 'column' }}>
 
-      {!isSeller && (
+      {!isSeller && !isAdminOrStaff && (
         <Navbar
           searchQuery={searchQuery}
           setSearchQuery={setSearchQuery}
           cartCount={cartCount}
           setIsCartOpen={setIsCartOpen}
           currentLocation={currentLocation}
-          setIsLocationModalOpen={setIsLocationModalOpen}
+          
           wishlistCount={wishlist.length}
           setIsWishlistOpen={setIsWishlistOpen}
         />
@@ -101,7 +133,9 @@ function App() {
           <Route
             path="/"
             element={
-              isSeller ? (
+              isAdminOrStaff ? (
+                <Navigate to="/admin" replace />
+              ) : isSeller ? (
                 <Navigate to="/seller" replace />
               ) : (
                 <CustomerHome
@@ -117,14 +151,19 @@ function App() {
               )
             }
           />
-          <Route path="/seller" element={<SellerHome />} />
-          <Route path="/account" element={isSeller ? <Navigate to="/seller" replace /> : <Account />} />
+          <Route path="/seller" element={<ProtectedSellerRoute><SellerHome /></ProtectedSellerRoute>} />
+          <Route path="/admin" element={<ProtectedAdminRoute><AdminDashboard /></ProtectedAdminRoute>} />
+          <Route path="/admin-login" element={<AdminLogin />} />
+          <Route path="/support-login" element={<HelpdeskLogin />} />
+          <Route path="/track/:orderId" element={<CustomerTrack />} />
+          <Route path="/account" element={isAdminOrStaff ? <Navigate to="/admin" replace /> : isSeller ? <Navigate to="/seller" replace /> : <Account />} />
           <Route path="/login" element={<Auth initialMode="login" />} />
           <Route path="/signup" element={<Auth initialMode="signup" />} />
         </Routes>
+      {!isSeller && !isAdminOrStaff && <FloatingChatbot mode="customer" />}
       </main>
 
-      {!isSeller && (
+      {!isSeller && !isAdminOrStaff && (
         <>
           <CartDrawer
             isOpen={isCartOpen}
@@ -142,16 +181,12 @@ function App() {
             addToCart={addToCart}
           />
 
-          <LocationModal
-            isOpen={isLocationModalOpen}
-            onClose={() => setIsLocationModalOpen(false)}
-            currentLocation={currentLocation}
-            setCurrentLocation={setCurrentLocation}
-          />
+          
         </>
       )}
     </div>
   );
 }
 
+// customer chatbot included
 export default App;

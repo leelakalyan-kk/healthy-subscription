@@ -20,3 +20,112 @@ body { margin: 0; font-family: 'Inter', system-ui, sans-serif; background: #f8fa
 .drawer-content { width: 380px; background: white; height: 100%; padding: 24px; display: flex; flex-direction: column; }
 .qty-controls { display: flex; align-items: center; gap: 8px; }
 .qty-controls button { width: 28px; height: 28px; border-radius: 50%; border: 1px solid #cbd5e1; background: white; cursor: pointer; }
+
+/* =========================================================
+   AUTO-RESPONSIVE ADAPTIVE LAYOUT (Mobile & Desktop)
+   ========================================================= */
+
+/* Base Reset for Clean Fitting */
+html, body, #root {
+  width: 100%;
+  max-width: 100vw;
+  overflow-x: hidden;
+  -webkit-text-size-adjust: 100%;
+}
+
+img {
+  max-width: 100%;
+  height: auto;
+}
+
+/* 📱 MOBILE PHONES (Screen Width <= 768px) */
+@media (max-width: 768px) {
+  /* Navbar adjustments */
+  .navbar {
+    padding: 10px 14px !important;
+    flex-wrap: wrap !important;
+    gap: 10px !important;
+  }
+  .search-box {
+    width: 100% !important;
+    order: 3 !important;
+    max-width: 100% !important;
+  }
+
+  /* Banners & Sections */
+  .hero-banner {
+    margin: 12px 10px !important;
+    padding: 24px 16px !important;
+    border-radius: 12px !important;
+  }
+  .menu-section {
+    padding: 12px 10px !important;
+  }
+
+  /* Grids to single/double columns */
+  div[style*="gridTemplateColumns"] {
+    grid-template-columns: 1fr !important;
+  }
+
+  /* Drawers / Modals fit 100% width on phone */
+  .drawer-content, div[style*="maxWidth: 420px"], div[style*="maxWidth: 380px"] {
+    width: 100% !important;
+    max-width: 100vw !important;
+  }
+
+  /* Flex containers stack vertically */
+  div[style*="display: flex"][style*="justifyContent: space-between"] {
+    flex-wrap: wrap !important;
+    gap: 8px !important;
+  }
+
+  /* Admin Sidebar collapsible on mobile */
+  aside {
+    width: 100% !important;
+    height: auto !important;
+    position: relative !important;
+  }
+
+  /* Touch-friendly buttons */
+  button, a {
+    min-height: 38px;
+  }
+}
+
+/* 💻 DESKTOP & LAPTOP SCREENS (Screen Width > 768px) */
+@media (min-width: 769px) {
+  .navbar {
+    padding: 16px 40px !important;
+  }
+  .hero-banner {
+    margin: 20px 40px !important;
+    padding: 46px 40px !important;
+  }
+  .menu-section {
+    padding: 20px 40px !important;
+  }
+}
+
+/* 📱 Strict Fix for Mobile S (<= 360px) */
+@media (max-width: 360px) {
+  body, #root, main {
+    width: 100% !important;
+    max-width: 100vw !important;
+    overflow-x: hidden !important;
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+  }
+
+  /* Form and cards fit directly inside screen */
+  div[style*="maxWidth: 440px"],
+  div[style*="maxWidth: 420px"],
+  div[style*="maxWidth: 400px"] {
+    width: calc(100% - 16px) !important;
+    margin: 12px auto !important;
+    padding: 16px 12px !important;
+  }
+
+  input, select, textarea, button {
+    font-size: 12px !important;
+  }
+}
