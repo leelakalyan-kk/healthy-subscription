@@ -1,38 +1,50 @@
-// Standardize Indian city aliases
-export const normalizeCity = (cityStr = '') => {
-  const c = cityStr.toLowerCase().trim();
-  if (c.includes('bengaluru') || c.includes('bangalore')) return 'bangalore';
-  if (c.includes('vijayawada') || c.includes('bezawada')) return 'vijayawada';
-  if (c.includes('hyderabad') || c.includes('secunderabad')) return 'hyderabad';
-  if (c.includes('visakhapatnam') || c.includes('vizag')) return 'visakhapatnam';
-  if (c.includes('chennai') || c.includes('madras')) return 'chennai';
-  if (c.includes('mumbai') || c.includes('bombay')) return 'mumbai';
-  if (c.includes('delhi') || c.includes('ncr') || c.includes('noida') || c.includes('gurgaon')) return 'delhi';
-  return c;
+// Earth's Radius in Kilometers
+const EARTH_RADIUS_KM = 6371;
+
+// Haversine Formula: Calculates real physical distance between two GPS coordinates
+export const calculateDistanceKm = (lat1, lon1, lat2, lon2) => {
+  const p1 = Number(lat1);
+  const l1 = Number(lon1);
+  const p2 = Number(lat2);
+  const l2 = Number(lon2);
+
+  if (isNaN(p1) || isNaN(l1) || isNaN(p2) || isNaN(l2)) {
+    return null;
+  }
+
+  const dLat = ((p2 - p1) * Math.PI) / 180;
+  const dLon = ((l2 - l1) * Math.PI) / 180;
+
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((p1 * Math.PI) / 180) *
+      Math.cos((p2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return Math.round(EARTH_RADIUS_KM * c * 10) / 10; // Round to 1 decimal place (e.g. 4.2 KM)
 };
 
-// Check if kitchen is deliverable to selected customer location
-export const isDeliverable = (customerLocStr = '', item = {}) => {
-  if (!customerLocStr || customerLocStr === '📍 Select Delivery Location') return true;
-
-  const cleanCust = customerLocStr.toLowerCase();
-  
-  // 1. PIN Check
-  const pinMatch = cleanCust.match(/\b\d{6}\b/);
-  const customerPin = pinMatch ? pinMatch[0] : '';
-  const kitchenPin = (item.pincode || '').trim();
-
-  if (customerPin && kitchenPin && customerPin === kitchenPin) {
+// Check deliverability strictly using User Coordinates & User Selected Radius
+export const isDeliverable = (customerCoords, itemCoords, maxRadiusKm = 10) => {
+  // If coordinates are missing or default location not yet selected, allow viewing
+  if (!customerCoords || !customerCoords.lat || !customerCoords.lng) {
+    return true;
+  }
+  if (!itemCoords || !itemCoords.lat || !itemCoords.lng) {
     return true;
   }
 
-  // 2. City Normalization Check
-  const normCustomerCity = normalizeCity(cleanCust);
-  const normKitchenCity = normalizeCity(item.city || item.areaName || '');
+  const actualDistance = calculateDistanceKm(
+    customerCoords.lat,
+    customerCoords.lng,
+    itemCoords.lat,
+    itemCoords.lng
+  );
 
-  if (normCustomerCity && normKitchenCity && normCustomerCity === normKitchenCity) {
-    return true;
-  }
+  if (actualDistance === null) return true;
 
-  return false;
+  // Purely dynamic: if distance <= user selected radius, it is deliverable
+  return actualDistance <= Number(maxRadiusKm);
 };

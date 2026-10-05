@@ -1,10 +1,12 @@
-import React, { useState, useEffect, useContext, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useContext, useCallback, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import io from 'socket.io-client';
 import { AuthContext } from '../../context/AuthContext';
 import FloatingChatbot from '../../components/FloatingChatbot';
 import GuidedTour from '../../components/GuidedTour';
+import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
 
 const socket = io(window.location.origin, {
   transports: ['websocket', 'polling']
@@ -32,9 +34,26 @@ const SellerHome = () => {
 
   const [activeTab, setActiveTab] = useState('orders');
   const [orderFilter, setOrderFilter] = useState('ALL');
+  const nowActual = new Date();
+  const [showMonthPopover, setShowMonthPopover] = useState(false);
+  const [pickerYear, setPickerYear] = useState(nowActual.getFullYear());
+  const [selectedStatementDate, setSelectedStatementDate] = useState(new Date(nowActual.getFullYear(), nowActual.getMonth(), 1));
+  const popoverRef = useRef(null);
 
-  const sellerDisplayName = activeUser?.kitchenName || activeUser?.username || 'Kitchen Partner';
-  const sellerIdentifier = String(activeUser?._id || activeUser?.id || activeUser?.username);
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (popoverRef.current && !popoverRef.current.contains(e.target)) {
+        setShowMonthPopover(false);
+      }
+    };
+    if (showMonthPopover) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showMonthPopover]);
+
+  const sellerDisplayName = activeUser?.kitchenName || activeUser?.username || '';
+  const sellerIdentifier = String(activeUser?._id || activeUser?.id || activeUser?.username || '');
 
   const [isKitchenOnline, setIsKitchenOnline] = useState(() => {
     const saved = localStorage.getItem(`kitchen_online_${sellerIdentifier}`);
@@ -45,12 +64,12 @@ const SellerHome = () => {
   const [foods, setFoods] = useState([]);
   const [withdrawals, setWithdrawals] = useState([]);
   const [withdrawAmount, setWithdrawAmount] = useState('');
-  const [payoutUpi, setPayoutUpi] = useState(activeUser?.email ? `${activeUser.username}@upi` : 'seller@upi');
+  const [payoutUpi, setPayoutUpi] = useState('');
   const [isSubmittingWithdraw, setIsSubmittingWithdraw] = useState(false);
   const [isTogglingKitchen, setIsTogglingKitchen] = useState(false);
 
   const [showAddDish, setShowAddDish] = useState(false);
-  const [editingDish, setEditingDish] = useState(null); // Dish currently being edited
+  const [editingDish, setEditingDish] = useState(null);
   const [updatingId, setUpdatingId] = useState(null);
   const [isUploadingDish, setIsUploadingDish] = useState(false);
 
@@ -61,7 +80,7 @@ const SellerHome = () => {
     protein: 'High Protein',
     imageUrl: '',
     sellerName: sellerDisplayName,
-    branchName: activeUser?.branchName || 'Main Outlet',
+    branchName: activeUser?.branchName || '',
     areaName: activeUser?.areaName || '',
     city: activeUser?.city || '',
     pincode: activeUser?.pincode || '',
@@ -70,7 +89,7 @@ const SellerHome = () => {
 
   const fetchOrders = useCallback(async () => {
     try {
-      const res = await axios.get('/api/orders/seller-orders/all');
+      const res = await axios.get('/api/orders/seller-orders/' + sellerIdentifier);
       if (Array.isArray(res.data)) {
         const myOrders = res.data.filter(o => {
           const sId = String(o.sellerId || '').trim();
@@ -95,26 +114,29 @@ const SellerHome = () => {
     } catch (err) {
       console.error('Error fetching seller orders:', err);
     }
-  }, [sellerIdentifier, sellerDisplayName]);
+  }, [sellerIdentifier, activeUser]);
 
   const fetchFoods = useCallback(async () => {
     try {
       const res = await axios.get('/api/food/all');
       if (Array.isArray(res.data)) {
         const myFoods = (res.data || []).filter(f => {
-          const sId = String(f.sellerId || '');
-          const sName = String(f.sellerName || '');
-          const curId = String(sellerIdentifier || '');
-          const curUser = String(activeUser?.username || '');
-          const curDisp = String(sellerDisplayName || '');
-          return sId === curId || sId === 'tests' || !f.sellerId || sName === curDisp || sName === curUser;
+          const sId = String(f.sellerId || '').trim();
+          const sName = String(f.sellerName || '').trim().toLowerCase();
+          const curId = String(sellerIdentifier || '').trim();
+          const curUser = String(activeUser?.username || '').trim().toLowerCase();
+          const curKitchen = String(activeUser?.kitchenName || '').trim().toLowerCase();
+
+          return (curId && sId === curId) ||
+                 (curUser && sId.toLowerCase() === curUser) ||
+                 (curKitchen && sName === curKitchen);
         });
         setFoods(myFoods.map(f => ({ ...f, isAvailable: f.isAvailable !== false })));
       }
     } catch (err) {
       console.error('Error fetching foods:', err);
     }
-  }, [sellerIdentifier, sellerDisplayName, activeUser]);
+  }, [sellerIdentifier, activeUser]);
 
   const fetchWithdrawals = useCallback(async () => {
     try {
@@ -222,13 +244,14 @@ const SellerHome = () => {
   const handleRequestWithdraw = async (e) => {
     e.preventDefault();
     if (!withdrawAmount || Number(withdrawAmount) <= 0) return alert('Please enter a valid payout amount');
+    if (!payoutUpi.trim()) return alert('Please enter your receiver UPI ID');
     setIsSubmittingWithdraw(true);
 
     try {
       const res = await axios.post('/api/withdraw/request', {
         sellerId: sellerIdentifier,
         amount: Number(withdrawAmount),
-        upiId: payoutUpi
+        upiId: payoutUpi.trim()
       });
 
       if (res.data?.success) {
@@ -250,7 +273,18 @@ const SellerHome = () => {
     let totalCommissionDeducted = 0;
     let totalNetEarned = 0;
 
+    const now = new Date();
+    const todayStr = now.toDateString();
+    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const currentMonth = now.getMonth();
+    const currentYear = now.getFullYear();
+
+    let todayNet = 0;
+    let weekNet = 0;
+    let monthNet = 0;
+
     validOrders.forEach(o => {
+      const oDate = new Date(o.createdAt || Date.now());
       const itemsSubtotal = (o.items || []).reduce((sum, item) => sum + (Number(item.price || 0) * Number(item.qty || 1)), 0);
       const foodRevenue = itemsSubtotal > 0 ? itemsSubtotal : Number(o.itemTotal || o.totalAmount || 0);
 
@@ -260,6 +294,19 @@ const SellerHome = () => {
       totalGrossSales += foodRevenue;
       totalCommissionDeducted += commission;
       totalNetEarned += net;
+
+      // 📅 Daily reset at 00:00 midnight
+      if (oDate.toDateString() === todayStr) {
+        todayNet += net;
+      }
+      // 🗓️ Rolling 7 days
+      if (oDate >= sevenDaysAgo) {
+        weekNet += net;
+      }
+      // 📆 Monthly reset on 1st of month
+      if (oDate.getMonth() === currentMonth && oDate.getFullYear() === currentYear) {
+        monthNet += net;
+      }
     });
 
     const totalWithdrawnAmount = withdrawals
@@ -276,7 +323,10 @@ const SellerHome = () => {
       totalWithdrawn: totalWithdrawnAmount,
       available: availableBalance,
       active: activeCount,
-      totalDishes: foods.length
+      totalDishes: foods.length,
+      todayNet,
+      weekNet,
+      monthNet
     };
   }, [orders, foods, withdrawals]);
 
@@ -351,7 +401,7 @@ const SellerHome = () => {
         imageUrl: dish.imageUrl,
         sellerId: sellerIdentifier,
         sellerName: sellerDisplayName,
-        branchName: dish.branchName || 'Main Kitchen',
+        branchName: dish.branchName || '',
         areaName: dish.areaName.trim(),
         city: dish.city.trim(),
         pincode: dish.pincode.trim()
@@ -368,7 +418,7 @@ const SellerHome = () => {
           protein: 'High Protein',
           imageUrl: '',
           sellerName: sellerDisplayName,
-          branchName: activeUser?.branchName || 'Main Kitchen',
+          branchName: activeUser?.branchName || '',
           areaName: activeUser?.areaName || '',
           city: activeUser?.city || '',
           pincode: activeUser?.pincode || '',
@@ -431,6 +481,108 @@ const SellerHome = () => {
     }
   };
 
+  
+  
+
+  
+    const downloadTaxStatementPDF = () => {
+    try {
+      const dObj = selectedStatementDate || new Date();
+      const filterYear = dObj.getFullYear();
+      const filterMonth = dObj.getMonth() + 1;
+      const periodLabel = dObj.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
+
+      const doc = new jsPDF();
+      doc.setFillColor(15, 23, 42);
+      doc.rect(0, 0, 210, 26, 'F');
+
+      doc.setFontSize(15);
+      doc.setTextColor(255, 255, 255);
+      doc.text("HealthyBites — OFFICIAL SELLER TAX & REVENUE STATEMENT", 14, 16);
+
+      doc.setFontSize(10);
+      doc.setTextColor(51, 65, 85);
+      doc.text("Kitchen Partner: " + (sellerDisplayName || 'Partner'), 14, 34);
+      doc.text("Seller Partner ID: " + String(sellerIdentifier || ''), 14, 40);
+      doc.text("Branch / Area: " + (activeUser?.areaName || 'Local Hub') + ", " + (activeUser?.city || ''), 14, 46);
+      doc.text("Statement Period: " + periodLabel, 14, 52);
+      doc.text("Generated On: " + new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }), 14, 58);
+
+      const targetOrders = (orders || []).filter(o => {
+        if (o.orderStatus === 'Cancelled') return false;
+        const orderDate = o.createdAt ? new Date(o.createdAt) : null;
+        if (!orderDate || isNaN(orderDate.getTime())) return false;
+        return orderDate.getFullYear() === filterYear && (orderDate.getMonth() + 1) === filterMonth;
+      });
+
+      let periodGross = 0;
+      let periodCommission = 0;
+      let periodNet = 0;
+
+      const tableRows = targetOrders.map((o, idx) => {
+        const itSub = (o.items || []).reduce((sum, item) => sum + (Number(item.price || 0) * Number(item.qty || 1)), 0);
+        const foodGross = itSub > 0 ? itSub : Number(o.itemTotal || o.totalAmount || 0);
+        const commission = Math.round(foodGross * COMMISSION_RATE);
+        const net = foodGross - commission;
+        const d = new Date(o.createdAt || Date.now());
+
+        periodGross += foodGross;
+        periodCommission += commission;
+        periodNet += net;
+
+        return [
+          idx + 1,
+          String(o._id || '').slice(-6).toUpperCase(),
+          d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }),
+          "Rs. " + foodGross,
+          "Rs. " + commission,
+          "Rs. " + net,
+          o.orderStatus || 'Delivered'
+        ];
+      });
+
+      autoTable(doc, {
+        startY: 64,
+        head: [['#', 'Order ID', 'Date', 'Gross Billing', 'Platform Fee (10%)', 'Net Income', 'Status']],
+        body: tableRows.length > 0 ? tableRows : [[1, 'N/A', 'N/A', 'Rs. 0', 'Rs. 0', 'Rs. 0', 'No orders in ' + periodLabel]],
+        headStyles: { fillColor: [22, 163, 74], textColor: 255, fontStyle: 'bold' },
+        styles: { fontSize: 9 }
+      });
+
+      let finalY = doc.lastAutoTable.finalY + 10;
+      doc.setFontSize(10);
+      doc.setTextColor(30, 41, 59);
+      doc.text("Period Gross Turn-over (Sales):", 120, finalY);
+      doc.text("Rs. " + periodGross, 185, finalY, { align: 'right' });
+
+      finalY += 6;
+      doc.text("Platform Commission Retained (10%):", 120, finalY);
+      doc.text("- Rs. " + periodCommission, 185, finalY, { align: 'right' });
+
+      finalY += 4;
+      doc.setDrawColor(203, 213, 225);
+      doc.line(120, finalY, 185, finalY);
+
+      finalY += 6;
+      doc.setFontSize(12);
+      doc.setTextColor(22, 163, 74);
+      doc.text("Net Taxable Business Income:", 120, finalY);
+      doc.text("Rs. " + periodNet, 185, finalY, { align: 'right' });
+
+      finalY += 14;
+      doc.setFontSize(9);
+      doc.setTextColor(100, 116, 139);
+      doc.text("This computer-generated statement serves as verified revenue proof for Income Tax (ITR) audit & GST compliance.", 14, finalY);
+
+      const safePartnerName = (sellerDisplayName || 'Kitchen').replace(/\s+/g, '_');
+      const safePeriod = periodLabel.replace(/\s+/g, '_');
+      doc.save("Tax_Statement_" + safePartnerName + "_" + safePeriod + ".pdf");
+    } catch (e) {
+      alert("PDF Statement Error: " + e.message);
+    }
+  };
+
+
   return (
     <>
       <GuidedTour tourKey="seller_v1" steps={sellerTourSteps} />
@@ -464,7 +616,7 @@ const SellerHome = () => {
               </span>
             </div>
             <h2 style={{ margin: '8px 0 2px 0', fontSize: '22px', fontWeight: '800' }}>
-              👨‍🍳 {sellerDisplayName} Operations Desk
+              👨‍🍳 {sellerDisplayName || 'Kitchen'} Operations Desk
             </h2>
             <span style={{ fontSize: '12px', color: '#94a3b8' }}>
               ID: {sellerIdentifier} • 10% Flat Platform Commission
@@ -525,6 +677,175 @@ const SellerHome = () => {
               }}
             >
               🚪 Logout
+            </button>
+          </div>
+        </div>
+
+        {/* PERIODIC EARNINGS & TAX DISPATCH CARD */}
+        <div style={{ background: '#ffffff', border: '1px solid #cbd5e1', borderRadius: '14px', padding: '16px 18px', marginBottom: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '14px' }}>
+          <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap', alignItems: 'center' }}>
+            <div>
+              <span style={{ fontSize: '11px', color: '#64748b', fontWeight: '800', textTransform: 'uppercase' }}>📅 Today's Net</span>
+              <div style={{ fontSize: '20px', fontWeight: '900', color: '#15803d' }}>₹{stats.todayNet || 0}</div>
+              <span style={{ fontSize: '10px', color: '#94a3b8' }}>Resets daily at 00:00</span>
+            </div>
+            <div style={{ borderLeft: '1px solid #e2e8f0', paddingLeft: '18px' }}>
+              <span style={{ fontSize: '11px', color: '#64748b', fontWeight: '800', textTransform: 'uppercase' }}>🗓️ Last 7 Days</span>
+              <div style={{ fontSize: '20px', fontWeight: '900', color: '#0369a1' }}>₹{stats.weekNet || 0}</div>
+              <span style={{ fontSize: '10px', color: '#94a3b8' }}>Rolling 7 days</span>
+            </div>
+            <div style={{ borderLeft: '1px solid #e2e8f0', paddingLeft: '18px' }}>
+              <span style={{ fontSize: '11px', color: '#64748b', fontWeight: '800', textTransform: 'uppercase' }}>📆 This Month</span>
+              <div style={{ fontSize: '20px', fontWeight: '900', color: '#7c3aed' }}>₹{stats.monthNet || 0}</div>
+              <span style={{ fontSize: '10px', color: '#94a3b8' }}>Resets on 1st of month</span>
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+            {/* Popover Month Trigger Button */}
+            <div style={{ position: 'relative' }} ref={popoverRef}>
+              <button
+                type="button"
+                onClick={() => setShowMonthPopover(!showMonthPopover)}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  background: '#ffffff',
+                  border: '1px solid #cbd5e1',
+                  padding: '9px 14px',
+                  borderRadius: '10px',
+                  fontSize: '13px',
+                  fontWeight: '700',
+                  color: '#0f172a',
+                  cursor: 'pointer',
+                  boxShadow: '0 1px 3px rgba(0,0,0,0.05)'
+                }}
+                aria-label="Choose order history month"
+              >
+                <span>📅</span>
+                <span>{selectedStatementDate.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' })}</span>
+                <span style={{ fontSize: '10px', color: '#64748b' }}>▼</span>
+              </button>
+
+              {/* Popover Content (Month & Year Calendar Grid without day selection) */}
+              {showMonthPopover && (
+                <div style={{
+                  position: 'absolute',
+                  top: '46px',
+                  right: 0,
+                  width: '270px',
+                  background: '#ffffff',
+                  border: '1px solid #cbd5e1',
+                  borderRadius: '14px',
+                  boxShadow: '0 15px 35px rgba(0,0,0,0.15)',
+                  zIndex: 9999,
+                  padding: '14px'
+                }}>
+                  {/* Year Header with Next/Prev Controls */}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', paddingBottom: '8px', borderBottom: '1px solid #f1f5f9' }}>
+                    <button
+                      type="button"
+                      onClick={() => setPickerYear(prev => prev - 1)}
+                      style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '6px', padding: '4px 8px', cursor: 'pointer', fontWeight: 'bold' }}
+                    >
+                      ◀
+                    </button>
+                    <strong style={{ fontSize: '15px', color: '#0f172a' }}>{pickerYear}</strong>
+                    <button
+                      type="button"
+                      disabled={pickerYear >= nowActual.getFullYear()}
+                      onClick={() => setPickerYear(prev => prev + 1)}
+                      style={{ background: pickerYear >= nowActual.getFullYear() ? '#f1f5f9' : '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '6px', padding: '4px 8px', cursor: pickerYear >= nowActual.getFullYear() ? 'not-allowed' : 'pointer', fontWeight: 'bold', color: pickerYear >= nowActual.getFullYear() ? '#cbd5e1' : '#0f172a' }}
+                    >
+                      ▶
+                    </button>
+                  </div>
+
+                  {/* 12 Months Grid (No dates/days) */}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px' }}>
+                    {[
+                      { idx: 0, name: 'Jan' },
+                      { idx: 1, name: 'Feb' },
+                      { idx: 2, name: 'Mar' },
+                      { idx: 3, name: 'Apr' },
+                      { idx: 4, name: 'May' },
+                      { idx: 5, name: 'Jun' },
+                      { idx: 6, name: 'Jul' },
+                      { idx: 7, name: 'Aug' },
+                      { idx: 8, name: 'Sep' },
+                      { idx: 9, name: 'Oct' },
+                      { idx: 10, name: 'Nov' },
+                      { idx: 11, name: 'Dec' }
+                    ].map(m => {
+                      const isSelected = selectedStatementDate.getFullYear() === pickerYear && selectedStatementDate.getMonth() === m.idx;
+                      const isFuture = pickerYear === nowActual.getFullYear() && m.idx > nowActual.getMonth();
+
+                      return (
+                        <button
+                          key={m.idx}
+                          type="button"
+                          disabled={isFuture}
+                          onClick={() => {
+                            setSelectedStatementDate(new Date(pickerYear, m.idx, 1));
+                            setShowMonthPopover(false);
+                          }}
+                          style={{
+                            padding: '8px 4px',
+                            borderRadius: '8px',
+                            border: isSelected ? '2px solid #16a34a' : '1px solid #f1f5f9',
+                            background: isSelected ? '#ecfdf5' : '#f8fafc',
+                            color: isFuture ? '#cbd5e1' : (isSelected ? '#16a34a' : '#334155'),
+                            fontWeight: isSelected ? '800' : '600',
+                            fontSize: '12px',
+                            cursor: isFuture ? 'not-allowed' : 'pointer',
+                            textAlign: 'center'
+                          }}
+                        >
+                          {m.name}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <div style={{ marginTop: '12px', borderTop: '1px solid #f1f5f9', paddingTop: '8px', textAlign: 'center' }}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedStatementDate(new Date(nowActual.getFullYear(), nowActual.getMonth(), 1));
+                        setPickerYear(nowActual.getFullYear());
+                        setShowMonthPopover(false);
+                      }}
+                      style={{ background: 'none', border: 'none', color: '#16a34a', fontSize: '11px', fontWeight: '800', cursor: 'pointer' }}
+                    >
+                      Jump to This Month
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Download Action Button */}
+            <button
+              type="button"
+              onClick={() => downloadTaxStatementPDF()}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                background: '#0f172a',
+                color: '#ffffff',
+                border: 'none',
+                padding: '10px 18px',
+                borderRadius: '10px',
+                fontSize: '12px',
+                fontWeight: '800',
+                cursor: 'pointer',
+                boxShadow: '0 2px 8px rgba(0,0,0,0.15)'
+              }}
+            >
+              <span>📑</span>
+              <span>Download Statement (PDF)</span>
             </button>
           </div>
         </div>
@@ -769,10 +1090,9 @@ const SellerHome = () => {
 
         {activeTab === 'menu' && (
           <div>
-            {/* ADD DISH FORM */}
             {showAddDish && (
               <form onSubmit={handleAddDish} style={{ background: '#ffffff', border: '2px solid #16a34a', borderRadius: '14px', padding: '20px', marginBottom: '22px', boxShadow: '0 4px 12px rgba(0,0,0,0.06)' }}>
-                <h4 style={{ margin: '0 0 14px 0', fontSize: '16px', color: '#0f172a', fontWeight: '800' }}>➕ Add New Dish for {sellerDisplayName}</h4>
+                <h4 style={{ margin: '0 0 14px 0', fontSize: '16px', color: '#0f172a', fontWeight: '800' }}>➕ Add New Dish for {sellerDisplayName || 'Kitchen'}</h4>
 
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '12px', marginBottom: '12px' }}>
                   <div>
@@ -893,7 +1213,6 @@ const SellerHome = () => {
               </form>
             )}
 
-            {/* EDIT DISH MODAL / FORM */}
             {editingDish && (
               <form onSubmit={handleUpdateDish} style={{ background: '#ffffff', border: '2px solid #0284c7', borderRadius: '14px', padding: '20px', marginBottom: '22px', boxShadow: '0 4px 15px rgba(2, 132, 199, 0.1)' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
@@ -1108,7 +1427,7 @@ const SellerHome = () => {
                   </label>
                   <input
                     type="text"
-                    placeholder="e.g. kitchen@upi"
+                    placeholder="e.g. mobile@upi"
                     value={payoutUpi}
                     onChange={e => setPayoutUpi(e.target.value)}
                     style={{ width: '100%', padding: '10px 12px', borderRadius: '8px', border: '1px solid #cbd5e1', fontSize: '14px', boxSizing: 'border-box' }}

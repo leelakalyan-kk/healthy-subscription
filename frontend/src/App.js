@@ -2,6 +2,7 @@ import React, { useState, useEffect, useContext } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { AuthContext } from './context/AuthContext';
 import Navbar from './components/Navbar';
+import Footer from './components/Footer';
 import CartDrawer from './components/CartDrawer';
 import WishlistDrawer from './components/WishlistDrawer';
 import CustomerHome from './pages/Customer/CustomerHome';
@@ -26,7 +27,6 @@ const ProtectedAdminRoute = ({ children }) => {
   if (!isAuthorized) {
     return <Navigate to="/admin-login" replace />;
   }
-
   return children;
 };
 
@@ -37,12 +37,24 @@ const ProtectedSellerRoute = ({ children }) => {
   const token = localStorage.getItem('token') || localStorage.getItem('auth_token');
 
   const user = currentUser || storedUser;
-  const isSeller = token && user && (user.role === 'seller' || user.username === 'tests');
+  const isSeller = token && user && user.role === 'seller';
 
   if (!isSeller) {
     return <Navigate to="/login" replace />;
   }
+  return children;
+};
 
+// Strict Protected Route for Logged-In Customers
+const ProtectedCustomerRoute = ({ children }) => {
+  const { currentUser } = useContext(AuthContext);
+  const storedUser = JSON.parse(localStorage.getItem('active_user') || 'null');
+  const token = localStorage.getItem('token') || localStorage.getItem('auth_token');
+
+  const user = currentUser || storedUser;
+  if (!token || !user) {
+    return <Navigate to="/login" replace />;
+  }
   return children;
 };
 
@@ -54,7 +66,7 @@ function App() {
   const [wishlist, setWishlist] = useState(() => JSON.parse(localStorage.getItem('user_wishlist') || '[]'));
   const [isCartOpen, setIsCartOpen] = useState(false);
   const [isWishlistOpen, setIsWishlistOpen] = useState(false);
-  
+
   const [currentLocation, setCurrentLocation] = useState(() => {
     return localStorage.getItem('user_delivery_hub') || '📍 Select Delivery Location';
   });
@@ -107,8 +119,9 @@ function App() {
 
   const activeUser = currentUser || JSON.parse(localStorage.getItem('active_user') || 'null');
   const token = localStorage.getItem('token') || localStorage.getItem('auth_token');
-  const isSeller = token && activeUser && (activeUser.role === 'seller' || activeUser.username === 'tests');
-  const isAdminOrStaff = token && activeUser && (activeUser.role === 'admin' || activeUser.role === 'helpdesk');
+  const isLoggedIn = Boolean(token && activeUser);
+  const isSeller = isLoggedIn && activeUser.role === 'seller';
+  const isAdminOrStaff = isLoggedIn && (activeUser.role === 'admin' || activeUser.role === 'helpdesk');
 
   const cartCount = cart.reduce((sum, item) => sum + item.qty, 0);
 
@@ -122,13 +135,12 @@ function App() {
           cartCount={cartCount}
           setIsCartOpen={setIsCartOpen}
           currentLocation={currentLocation}
-          
           wishlistCount={wishlist.length}
           setIsWishlistOpen={setIsWishlistOpen}
         />
       )}
 
-      <main style={{ flex: 1 }}>
+      <main style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
         <Routes>
           <Route
             path="/"
@@ -155,13 +167,22 @@ function App() {
           <Route path="/admin" element={<ProtectedAdminRoute><AdminDashboard /></ProtectedAdminRoute>} />
           <Route path="/admin-login" element={<AdminLogin />} />
           <Route path="/support-login" element={<HelpdeskLogin />} />
-          <Route path="/track/:orderId" element={<CustomerTrack />} />
-          <Route path="/account" element={isAdminOrStaff ? <Navigate to="/admin" replace /> : isSeller ? <Navigate to="/seller" replace /> : <Account />} />
+          
+          {/* Strict Protected Routes: Login required */}
+          <Route path="/track/:orderId" element={<ProtectedCustomerRoute><CustomerTrack /></ProtectedCustomerRoute>} />
+          <Route path="/account" element={isAdminOrStaff ? <Navigate to="/admin" replace /> : isSeller ? <Navigate to="/seller" replace /> : <ProtectedCustomerRoute><Account /></ProtectedCustomerRoute>} />
+          
           <Route path="/login" element={<Auth initialMode="login" />} />
           <Route path="/signup" element={<Auth initialMode="signup" />} />
         </Routes>
-      {!isSeller && !isAdminOrStaff && <FloatingChatbot mode="customer" />}
+
+        {/* Floating Chatbot ONLY visible when authenticated */}
+        {isLoggedIn && !isAdminOrStaff && (
+          <FloatingChatbot mode={isSeller ? "seller" : "customer"} />
+        )}
       </main>
+
+      {!isSeller && !isAdminOrStaff && <Footer />}
 
       {!isSeller && !isAdminOrStaff && (
         <>
@@ -180,13 +201,10 @@ function App() {
             toggleWishlist={toggleWishlist}
             addToCart={addToCart}
           />
-
-          
         </>
       )}
     </div>
   );
 }
 
-// customer chatbot included
 export default App;

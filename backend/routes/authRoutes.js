@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
+const mongoose = require('mongoose');
 const User = require('../models/User');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'healthy_bites_jwt_secret_key_2026';
@@ -47,11 +48,12 @@ router.post('/signup', async (req, res) => {
       phone: cleanPhone,
       role: assignedRole,
       kitchenName: kitchenName ? kitchenName.trim() : (assignedRole === 'seller' ? username.trim() : ''),
-      branchName: branchName ? branchName.trim() : 'Main Kitchen',
+      branchName: branchName ? branchName.trim() : '',
       areaName: areaName ? areaName.trim() : '',
       city: city ? city.trim() : '',
       pincode: pincode ? pincode.trim() : '',
-      walletBalance: 0
+      walletBalance: 0,
+      addresses: []
     });
 
     await newUser.save();
@@ -107,20 +109,17 @@ router.post(['/login', '/signin'], async (req, res) => {
       return res.status(403).json({ success: false, message: 'Access Denied: This account is not a Kitchen Partner.' });
     }
 
-    // ⏳ 30-Day Account Deletion Enforcement
     let wasDeletionCancelled = false;
     if (user.isDeletionPending && user.deletionRequestedAt) {
       const daysPassed = (Date.now() - new Date(user.deletionRequestedAt).getTime()) / (1000 * 60 * 60 * 24);
 
       if (daysPassed > 30) {
-        // Permanently Delete Expired Account
         await User.findByIdAndDelete(user._id);
         return res.status(403).json({
           success: false,
           message: '❌ Your account was permanently deleted after the 30-day notice period. Please register as a new user.'
         });
       } else {
-        // Logged in within 30 days -> Auto Cancel Deletion & Restore
         user.isDeletionPending = false;
         user.deletionRequestedAt = null;
         await user.save();
@@ -149,6 +148,7 @@ router.post(['/login', '/signin'], async (req, res) => {
         city: user.city,
         pincode: user.pincode,
         walletBalance: user.walletBalance || 0,
+        addresses: user.addresses || [],
         isDeletionPending: user.isDeletionPending
       }
     });
@@ -157,68 +157,169 @@ router.post(['/login', '/signin'], async (req, res) => {
   }
 });
 
-// 3. Forgot Password / Reset Password Endpoint
+// 3. User Address Save & Sync API (Database Permanent Storage)
+router.post('/save-address', async (req, res) => {
+  try {
+    const { userId, addressObj } = req.body;
+    if (!userId || !addressObj) {
+      return res.status(400).json({ success: false, message: 'User ID and address are required.' });
+    }
+
+    const isOid = mongoose.isValidObjectId(userId);
+    const filter = isOid ? { _id: userId } : { username: String(userId).trim() };
+
+    let user = await User.findOne(filter);
+    if (!user) user = await User.findOne({ email: String(userId).trim() });
+
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found in DB.' });
+    }
+
+    if (!Array.isArray(user.addresses)) {
+      user.addresses = [];
+    }
+
+    if (addressObj.isDefault) {
+      user.addresses.forEach(a => a.isDefault = false);
+    } else if (user.addresses.length === 0) {
+      addressObj.isDefault = true;
+    }
+
+    const existingIdx = user.addresses.findIndex(a => a.id === addressObj.id);
+    if (existingIdx >= 0) {
+      user.addresses[existingIdx] = addressObj;
+    } else {
+      user.addresses.unshift(addressObj);
+    }
+
+    await user.save();
+    res.json({ success: true, message: 'Address permanently stored in DB!', addresses: user.addresses });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// 4. Get User Addresses from Database
+router.get('/get-addresses/:userId', async (req, res) => {
+  try {
+    const queryId = req.params.userId;
+    const isOid = mongoose.isValidObjectId(queryId);
+    const filter = isOid ? { _id: queryId } : { username: String(queryId).trim() };
+
+    let user = await User.findOne(filter);
+    if (!user) user = await User.findOne({ email: String(queryId).trim() });
+
+    res.json(user?.addresses || []);
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// 5. Delete Address from Database
+router.delete('/delete-address/:userId/:addrId', async (req, res) => {
+  try {
+    const { userId, addrId } = req.params;
+    const isOid = mongoose.isValidObjectId(userId);
+    const filter = isOid ? { _id: userId } : { username: String(userId).trim() };
+
+    let user = await User.findOne(filter);
+    if (!user) user = await User.findOne({ email: String(userId).trim() });
+
+    if (user && Array.isArray(user.addresses)) {
+      user.addresses = user.addresses.filter(a => a.id !== addrId);
+      if (user.addresses.length > 0 && !user.addresses.some(a => a.isDefault)) {
+        user.addresses[0].isDefault = true;
+      }
+      await user.save();
+    }
+    res.json({ success: true, message: 'Address deleted from DB', addresses: user?.addresses || [] });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// 6. Set Default Address in Database
+router.put('/set-default-address/:userId/:addrId', async (req, res) => {
+  try {
+    const { userId, addrId } = req.params;
+    const isOid = mongoose.isValidObjectId(userId);
+    const filter = isOid ? { _id: userId } : { username: String(userId).trim() };
+
+    let user = await User.findOne(filter);
+    if (!user) user = await User.findOne({ email: String(userId).trim() });
+
+    if (user && Array.isArray(user.addresses)) {
+      user.addresses.forEach(a => {
+        a.isDefault = (a.id === addrId);
+      });
+      await user.save();
+    }
+    res.json({ success: true, addresses: user?.addresses || [] });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// 7. Forgot Password
 router.post('/forgot-password', async (req, res) => {
   try {
     const { username, phone, newPassword } = req.body;
-
     if (!username || !phone || !newPassword) {
-      return res.status(400).json({ success: false, message: 'Username, registered phone, and new password are required.' });
+      return res.status(400).json({ success: false, message: 'Username, phone, and new password are required.' });
     }
-
-    const cleanPhone = String(phone).replace(/\D/g, '');
+    const cleanPhone = String(phone).replace(/\D/g, '').slice(-10);
     const user = await User.findOne({ username: username.trim(), phone: cleanPhone });
 
     if (!user) {
-      return res.status(404).json({ success: false, message: 'Verification failed: Username and phone number do not match our records.' });
+      return res.status(404).json({ success: false, message: 'Verification failed: Username and phone number do not match.' });
     }
 
     const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&#^_-])[A-Za-z\d@$!\%*?&#^_-]{8,}$/;
     if (!passwordRegex.test(newPassword)) {
       return res.status(400).json({
         success: false,
-        message: 'New password must be at least 8 chars long with 1 Uppercase, 1 Lowercase, 1 Number, and 1 Symbol.'
+        message: 'New password must be at least 8 chars long with 1 Upper, 1 Lower, 1 Num, and 1 Symbol.'
       });
     }
 
     user.password = newPassword;
     await user.save();
-
-    res.json({ success: true, message: '🎉 Password reset successfully! Please log in with your new password.' });
+    res.json({ success: true, message: '🎉 Password reset successfully! Please log in.' });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
 });
 
-// 4. Request Account Deletion (30-Day Notice Period)
+// 8. Request Deletion (30-Day Notice)
 router.post('/request-deletion', async (req, res) => {
   try {
     const { userId } = req.body;
-    const user = await User.findById(userId);
+    const isOid = mongoose.isValidObjectId(userId);
+    const user = await User.findOne({
+      $or: [
+        isOid ? { _id: userId } : null,
+        { username: String(userId).trim() },
+        { email: String(userId).trim().toLowerCase() }
+      ].filter(Boolean)
+    });
 
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'Account not found' });
-    }
+    if (!user) return res.status(404).json({ success: false, message: 'Account not found' });
 
     user.isDeletionPending = true;
     user.deletionRequestedAt = new Date();
     await user.save();
-
-    res.json({
-      success: true,
-      message: '⚠️ Deletion scheduled: Your account will be permanently erased in 30 days. You can cancel this anytime by simply logging back in within 30 days.'
-    });
+    res.json({ success: true, message: '⚠️ Deletion scheduled: Account will be erased in 30 days.' });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
 });
 
-// 5. Helpdesk endpoints
+// 9. Helpdesk endpoints
 router.post('/create-helpdesk', async (req, res) => {
   try {
     const { username, password, agentName, phone } = req.body;
-    const cleanPhone = String(phone || '').replace(/\D/g, '');
-    if (!cleanPhone || cleanPhone.length !== 10) {
+    const cleanPhone = String(phone || '').replace(/\D/g, '').slice(-10);
+    if (cleanPhone.length !== 10) {
       return res.status(400).json({ success: false, message: 'Contact Number must be exactly 10 digits.' });
     }
     const exists = await User.findOne({ username: username.trim() });

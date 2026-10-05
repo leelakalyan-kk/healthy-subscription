@@ -14,9 +14,9 @@ router.post('/request', async (req, res) => {
     const refNumber = `PAYOUT_${Math.floor(100000 + Math.random() * 900000)}`;
 
     const withdrawDoc = {
-      sellerId: sellerId || 'kalyan',
+      sellerId: sellerId || '',
       amount: Number(amount),
-      payoutDetails: upiId || 'partner@okhdfcbank',
+      payoutDetails: String(upiId || ''),
       referenceId: refNumber,
       status: 'Completed',
       type: 'SELLER_PAYOUT',
@@ -108,8 +108,8 @@ router.get('/history/:sellerId', async (req, res) => {
       query = {
         $or: [
           { sellerId: sellerId },
-          { sellerId: 'tests' },
-          { sellerId: 'kalyan' }
+          
+          
         ]
       };
     }

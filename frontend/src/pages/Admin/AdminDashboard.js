@@ -39,9 +39,9 @@ const AdminDashboard = () => {
   const [isProcessingAction, setIsProcessingAction] = useState(false);
 
   const [adminWithdrawAmt, setAdminWithdrawAmt] = useState('');
-  const [accountNumber, setAccountNumber] = useState('50100492819281');
-  const [ifscCode, setIfscCode] = useState('HDFC0001243');
-  const [accountHolder, setAccountHolder] = useState('HealthyBites Platform Corp');
+  const [accountNumber, setAccountNumber] = useState('');
+  const [ifscCode, setIfscCode] = useState('');
+  const [accountHolder, setAccountHolder] = useState('');
   const [isProcessingWithdraw, setIsProcessingWithdraw] = useState(false);
 
   const [showAddStaff, setShowAddStaff] = useState(false);
@@ -293,7 +293,7 @@ const AdminDashboard = () => {
     orders.forEach(o => {
       const shortId = (o._id || '').slice(-6).toUpperCase();
       const amt = Number(o.totalAmount || o.itemTotal || 0);
-      csv += `"${shortId}","${o.customerName || 'Customer'}","${o.customerPhone || '8309720219'}","${(o.deliveryAddress || '').replace(/"/g, '""')}","${amt}","${Math.round(amt * 0.1)}","${o.orderStatus || 'Placed'}","${new Date(o.createdAt || Date.now()).toLocaleString()}"\n`;
+      csv += `"${shortId}","${o.customerName || 'Customer'}","${o.customerPhone || '18002022026'}","${(o.deliveryAddress || '').replace(/"/g, '""')}","${amt}","${Math.round(amt * 0.1)}","${o.orderStatus || 'Placed'}","${new Date(o.createdAt || Date.now()).toLocaleString()}"\n`;
     });
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);

@@ -38,7 +38,7 @@ router.post('/create', async (req, res) => {
         title: i.title || 'Healthy Meal',
         price: Number(i.price || 0),
         qty: Number(i.qty || 1),
-        sellerId: String(i.sellerId || 'tests')
+        sellerId: String(i.sellerId || '')
       })),
       totalAmount: Number(totalAmount || 0),
       deliveryAddress: deliveryAddress || 'Address Not Provided',
@@ -114,7 +114,7 @@ router.put('/status/:id', async (req, res) => {
 
     const existingOrder = await mongoose.connection.db.collection('orders').findOne({ _id: new ObjectId(req.params.id) });
     const rawCustPhone = String(existingOrder?.customerPhone || '').replace(/\D/g, '');
-    const lockedOtp = rawCustPhone.length >= 4 ? rawCustPhone.slice(-4) : (existingOrder?.deliveryOtp || '5895');
+    const lockedOtp = rawCustPhone.length >= 4 ? rawCustPhone.slice(-4) : (existingOrder?.deliveryOtp || '');
 
     const updateFields = {
       orderStatus: status,

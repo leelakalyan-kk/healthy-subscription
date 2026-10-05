@@ -3,6 +3,24 @@ const router = express.Router();
 const Food = require('../models/Food');
 const cloudinary = require('../utils/cloudinary');
 const mongoose = require('mongoose');
+// Dynamic Real GPS resolver based strictly on Seller Input (Area, City, Pincode)
+async function getDynamicCoords(areaName, city, pincode) {
+  try {
+    const parts = [areaName, city, pincode].filter(Boolean).map(s => String(s).trim());
+    const query = encodeURIComponent(parts.join(', '));
+    const response = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${query}&limit=1`, {
+      headers: { 'User-Agent': 'HealthyBites-Backend-Engine/1.0' }
+    });
+    const data = await response.json();
+    if (data && data.length > 0) {
+      return { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon) };
+    }
+  } catch (e) {
+    console.warn("Dynamic geocode failed for:", areaName, city, pincode);
+  }
+  return { lat: 0, lng: 0 };
+}
+
 
 // 1. Get All Foods
 router.get('/all', async (req, res) => {
@@ -54,7 +72,9 @@ router.post('/add', async (req, res) => {
       branchName,
       areaName,
       city,
-      pincode
+      pincode,
+      lat,
+      lng
     } = req.body;
 
     let finalImageUrl = imageUrl || '';
@@ -67,8 +87,18 @@ router.post('/add', async (req, res) => {
         finalImageUrl = uploadRes.secure_url;
       } catch (cErr) {
         console.warn("Cloudinary upload failed, using fallback:", cErr.message);
-        finalImageUrl = 'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?w=500';
+        finalImageUrl = '';
       }
+    }
+
+    // Purely dynamic: Resolve GPS from seller's input area, city, pincode
+    let resolvedLat = Number(lat || 0);
+    let resolvedLng = Number(lng || 0);
+
+    if (!resolvedLat || !resolvedLng) {
+      const geo = await getDynamicCoords(areaName, city, pincode);
+      resolvedLat = geo.lat;
+      resolvedLng = geo.lng;
     }
 
     const newFood = new Food({
@@ -79,10 +109,12 @@ router.post('/add', async (req, res) => {
       imageUrl: finalImageUrl,
       sellerId: String(sellerId || ''),
       sellerName: String(sellerName || ''),
-      branchName: branchName?.trim() || 'Main Branch',
-      areaName: areaName?.trim() || 'Local Area',
-      city: city?.trim() || 'Vijayawada',
-      pincode: pincode?.trim() || '520001',
+      branchName: branchName?.trim() || '',
+      areaName: areaName?.trim() || '',
+      city: city?.trim() || '',
+      pincode: pincode?.trim() || '',
+      lat: resolvedLat,
+      lng: resolvedLng,
       isAvailable: true
     });
 
@@ -103,7 +135,15 @@ router.post('/add', async (req, res) => {
 // 4. Update Food
 router.put('/update/:id', async (req, res) => {
   try {
-    const updated = await Food.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    const updateData = { ...req.body };
+    if (updateData.areaName || updateData.city || updateData.pincode) {
+      const geo = await getDynamicCoords(updateData.areaName, updateData.city, updateData.pincode);
+      if (geo.lat && geo.lng) {
+        updateData.lat = geo.lat;
+        updateData.lng = geo.lng;
+      }
+    }
+    const updated = await Food.findByIdAndUpdate(req.params.id, updateData, { new: true });
     const io = req.app.get('io');
     if (io && updated) {
       io.emit('food_updated', updated);

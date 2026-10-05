@@ -121,7 +121,7 @@ export default function FloatingChatbot({ mode = 'customer' }) {
       const res = await axios.post('/api/extra/support/ticket/create', {
         senderRole: isSeller ? 'seller' : 'customer',
         senderName: activeUser.username || (isSeller ? 'Kitchen' : 'Customer'),
-        senderContact: activeUser.phone || '8309720219',
+        senderContact: activeUser.phone || '18002022026',
         orderId: ticketOrderId,
         issueType: ticketIssue,
         message: ticketMsg
